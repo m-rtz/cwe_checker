@@ -224,6 +224,11 @@
       "calloc"
     ]
   },
+  "CWE908": {
+    "symbols": [
+      "malloc"
+    ]
+  },
   "check_path": {
     "_comment": "functions that take direct user input",
     "symbols": [
