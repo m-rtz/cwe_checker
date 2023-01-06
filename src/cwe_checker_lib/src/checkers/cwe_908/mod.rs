@@ -1,10 +1,14 @@
 mod context;
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    borrow::BorrowMut,
+    collections::{HashMap, HashSet},
+};
 
 use crate::{
-    abstract_domain::AbstractIdentifier,
+    abstract_domain::{AbstractIdentifier, IntervalDomain, MemRegion},
     analysis::{
+        self,
         fixpoint::Computation,
         forward_interprocedural_fixpoint::{create_computation, GeneralizedContext},
         graph::Edge,
@@ -13,12 +17,15 @@ use crate::{
         vsa_results::VsaResult,
     },
     intermediate_representation::*,
+    utils::symbol_utils::get_symbol_map,
 };
+use apint::ApInt;
 use itertools::Itertools;
 use petgraph::graph::NodeIndex;
 use serde::{Deserialize, Serialize};
 
 use self::context::Context;
+use crate::checkers::cwe_908::context::InitializationStatus;
 use crate::{
     analysis::graph::*,
     utils::{
@@ -27,7 +34,6 @@ use crate::{
     },
     AnalysisResults, CweModule,
 };
-use context::InitalizationStatus;
 
 /// The module name and version
 pub static CWE_MODULE: CweModule = CweModule {
@@ -83,26 +89,41 @@ fn find_abstract_identifier(tid: &Tid, state: &State) -> Option<AbstractIdentifi
     None
 }
 
-fn compute<'a>(
-    graph: &'a Graph,
-    pir: &'a PointerInference<'a>,
-    malloc_calls: Vec<(Tid, NodeIndex)>,
-) -> Computation<GeneralizedContext<'a, Context<'a>>> {
-    let context = Context::new(graph, pir);
-    let mut computation = create_computation(context, None);
-
-    for (tid, node) in malloc_calls {
-        if let Some(fp_node_value) = pir.get_node_value(node) {
-            // Some Nodes after malloc have no Value !?
-            if let Some(abstract_id) = find_abstract_identifier(&tid, fp_node_value.unwrap_value())
-            {
+fn init_heap_allocation<'a>(
+    computation: &mut Computation<GeneralizedContext<'a, Context<'a>>>,
+    alloc_calls: &Vec<(Tid, NodeIndex)>,
+    symbol_map: HashMap<Tid, &ExternSymbol>,
+    pir: &PointerInference,
+) {
+    for (call, node) in alloc_calls {
+        if let Some(fp_node_value) = pir.get_node_value(*node) {
+            if let Some(id) = find_abstract_identifier(call, fp_node_value.unwrap_value()) {
+                let mut value = HashMap::new();
+                let mut mem_region = MemRegion::new(ByteSize::new(8)); // TODO empty mem region is uninitalized memregion
+                mem_region.insert_interval(
+                    &InitializationStatus::Uninit,
+                    &IntervalDomain::new(ApInt::from_i64(0), ApInt::from_i64(20)),
+                );
+                value.insert(id, mem_region);
                 computation.set_node_value(
-                    node,
-                    NodeValue::Value(HashMap::from([(abstract_id, InitalizationStatus::Uninit)])),
+                    *node,
+                    analysis::interprocedural_fixpoint_generic::NodeValue::Value(value),
                 );
             }
         }
     }
+}
+
+fn compute<'a>(
+    graph: &'a Graph,
+    pir: &'a PointerInference<'a>,
+    alloc_calls: Vec<(Tid, NodeIndex)>,
+    symbol_map: HashMap<Tid, &ExternSymbol>,
+) -> Computation<GeneralizedContext<'a, Context<'a>>> {
+    let context = Context::new(graph, pir);
+    let mut computation = create_computation(context, None);
+
+    init_heap_allocation(&mut computation, &alloc_calls, symbol_map, pir);
     computation.compute_with_max_steps(100);
 
     if !computation.has_stabilized() {
@@ -133,7 +154,7 @@ fn generate_cwe_warning(location: &Tid, is_stack_allocation: bool) -> CweWarning
 
 fn find_uninit_access_in_blk<'a>(
     computation: &Computation<GeneralizedContext<'a, Context<'a>>>,
-    value: &HashMap<AbstractIdentifier, InitalizationStatus>,
+    value: &HashMap<AbstractIdentifier, MemRegion<InitializationStatus>>,
     blk: &Blk,
 ) -> Vec<CweWarning> {
     let pir = computation.get_context().get_context().pir;
@@ -142,14 +163,13 @@ fn find_uninit_access_in_blk<'a>(
 
     for def in &blk.defs {
         match &def.term {
-            Def::Load { var, address } => {
+            Def::Load { .. } => {
                 if let Some(data_domain) = pir.eval_address_at_def(&def.tid) {
                     for id in data_domain.get_relative_values().keys() {
-                        if let Some(i) = value.get(id) {
-                            if i == &InitalizationStatus::Uninit {
-                                dbg!(&data_domain.to_json_compact());
-                                println!("Uninit Access!");
-
+                        if let Some(mem_region) = value.get(id) {
+                            if mem_region.contains_uninit_within_interval(
+                                data_domain.get_relative_values().get(id).unwrap(),
+                            ) {
                                 cwe_warnings.push(generate_cwe_warning(&def.tid, false))
                             }
                         }
@@ -159,13 +179,16 @@ fn find_uninit_access_in_blk<'a>(
             Def::Store { .. } => {
                 if let Some(data_domain) = pir.eval_address_at_def(&def.tid) {
                     for id in data_domain.get_relative_values().keys() {
-                        if let Some(i) = value.get(id) {
-                            if i == &InitalizationStatus::Uninit {
-                                value.insert(
-                                    id.clone(),
-                                    InitalizationStatus::Init {
-                                        addresses: HashSet::from([def.tid.clone()]),
+                        if let Some(mem_region) = value.get_mut(id) {
+                            // mem_region contains uninit within the interval of interest. Change it!
+                            if mem_region.contains_uninit_within_interval(
+                                data_domain.get_relative_values().get(id).unwrap(),
+                            ) {
+                                mem_region.insert_interval(
+                                    &InitializationStatus::Init {
+                                        addresses: [def.tid.clone()].into(),
                                     },
+                                    data_domain.get_relative_values().get(id).unwrap(),
                                 );
                                 println!("is Initalized here!")
                             }
@@ -186,12 +209,11 @@ fn extract_results<'a>(
     let graph = computation.get_graph();
     for node in graph.node_indices() {
         if let Some(node_value) = computation.get_node_value(node) {
-            dbg!(&node);
             // only consider nodes with uninitalized memory
             if node_value
                 .unwrap_value()
                 .values()
-                .contains(&InitalizationStatus::Uninit)
+                .any(|x| x.contains_uninit())
             {
                 cwe_warnings.append(
                     find_uninit_access_in_blk(
@@ -214,10 +236,17 @@ pub fn check_cwe(
     let config: Config = serde_json::from_value(cwe_params.clone()).unwrap();
     let results = analysis_results.pointer_inference.unwrap();
 
+    let symbol_map = get_symbol_map(analysis_results.project, &config.symbols);
+
     let allocation_target_nodes =
         find_allocation_returnsites(config.symbols, results.get_graph(), analysis_results);
 
-    let computation = compute(results.get_graph(), results, allocation_target_nodes);
+    let computation = compute(
+        results.get_graph(),
+        results,
+        allocation_target_nodes,
+        symbol_map,
+    );
     let mut cwe_warnings = extract_results(computation);
     cwe_warnings.dedup();
 
