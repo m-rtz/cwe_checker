@@ -98,17 +98,13 @@ fn init_heap_allocation<'a>(
     for (call, node) in alloc_calls {
         if let Some(fp_node_value) = pir.get_node_value(*node) {
             if let Some(id) = find_abstract_identifier(call, fp_node_value.unwrap_value()) {
-                let mut value = HashMap::new();
-                let mut mem_region = MemRegion::new(ByteSize::new(8)); // TODO empty mem region is uninitalized memregion
-                mem_region.insert_interval(
-                    &InitializationStatus::Uninit,
-                    &IntervalDomain::new(ApInt::from_i64(0), ApInt::from_i64(20)),
-                );
-                value.insert(id, mem_region);
+                let mem_region = MemRegion::new(ByteSize::new(8));
+                let value = HashMap::from([(id, mem_region)]);
                 computation.set_node_value(
                     *node,
                     analysis::interprocedural_fixpoint_generic::NodeValue::Value(value),
                 );
+                computation.get_node_value(*node).unwrap().unwrap_value();
             }
         }
     }
@@ -210,15 +206,12 @@ fn extract_results<'a>(
     for node in graph.node_indices() {
         if let Some(node_value) = computation.get_node_value(node) {
             // only consider nodes with uninitalized memory
-            if node_value
-                .unwrap_value()
-                .values()
-                .any(|x| x.contains_uninit())
+
             {
                 cwe_warnings.append(
                     find_uninit_access_in_blk(
                         &computation,
-                        computation.get_node_value(node).unwrap().unwrap_value(),
+                        node_value.unwrap_value(),
                         &computation.get_graph()[node].get_block().term,
                     )
                     .as_mut(),

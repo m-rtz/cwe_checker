@@ -75,7 +75,7 @@ impl SizedDomain for InitializationStatus {
         ByteSize::new(1)
     }
 
-    fn new_top(bytesize: ByteSize) -> Self {
+    fn new_top(_bytesize: ByteSize) -> Self {
         InitializationStatus::MaybeInit {
             addresses: [].into(),
         }
@@ -96,9 +96,22 @@ impl MemRegion<InitializationStatus> {
             .values()
             .contains(&InitializationStatus::Uninit)
     }
+
+    /// Returns the `InitalizationStatus` at the given offset.
+    ///
+    /// If no value at the offset is present `InitalizationStatus::Uninit` is returned.
     pub fn get_init_status_at_byte_index(&self, index: i64) -> InitializationStatus {
-        self.get(Bitvector::from_i64(index), ByteSize::new(1))
+        if let Some(status) = self.entry_map().get(&index) {
+            status.clone()
+        } else {
+            InitializationStatus::Uninit
+        }
     }
+
+    /// Returns true if the `MemRegion` contains at least one `InitalizationStatus::Uninit` value
+    /// within the given offset interval.
+    ///
+    /// Note that values not set are treated as `InitalizationStatus::Uninit`.
     pub fn contains_uninit_within_interval(&self, interval: &IntervalDomain) -> bool {
         let (lower_bound, higher_bound) = interval.try_to_offset_interval().unwrap();
         for i in lower_bound..=higher_bound {
@@ -109,6 +122,7 @@ impl MemRegion<InitializationStatus> {
         false
     }
 
+    // Inserts an `InitalizationStatus` at multiple offsets, utilizing the `merge()` function.
     pub fn insert_interval(&mut self, status: &InitializationStatus, interval: &IntervalDomain) {
         let (lower_bound, higher_bound) = interval.try_to_offset_interval().unwrap();
         for i in lower_bound..=higher_bound {
@@ -146,16 +160,23 @@ impl<'a> crate::analysis::forward_interprocedural_fixpoint::Context<'a> for Cont
     /// Both sets are combined, but if the status the same memory object is initialized
     /// and uninitialized, the status is set to `MaybeInit`.
     fn merge(&self, value1: &Self::Value, value2: &Self::Value) -> Self::Value {
+        dbg!("mergein", &value1, &value2);
         let mut merged = value1.clone();
-        for (id, status) in value2.iter() {
+        for (id, mem_region) in value2.iter() {
             if merged.contains_key(id) {
-                merged.insert(id.clone(), value2.get(id).unwrap().merge(status));
+                let mut mem_region = merged.get(id).unwrap().clone();
+                for (i, status) in value2.get(id).unwrap().entry_map().iter() {
+                    mem_region.insert_at_byte_index(
+                        mem_region.get_init_status_at_byte_index(*i).merge(status),
+                        *i,
+                    );
+                }
             } else {
-                merged.insert(id.clone(), status.clone()).unwrap();
+                merged.insert(id.clone(), mem_region.clone()).unwrap();
             }
         }
 
-        merged
+        dbg!(merged)
     }
 
     /// Changes the `InitalizationStatus` of an `Uninit` memory object to `Init`, if a `Store` instruction
