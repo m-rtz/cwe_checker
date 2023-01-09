@@ -18,7 +18,23 @@ pub enum InitializationStatus {
     Uninit,
 }
 
+impl InitializationStatus {
+    /// merge for in-block statuses (Init + Uninit = Init)
+    pub fn merge_precise(&self, other: &Self) -> Self {
+        match (self, other) {
+            (InitializationStatus::Init { addresses }, InitializationStatus::Uninit)
+            | (InitializationStatus::Uninit, InitializationStatus::Init { addresses }) => {
+                InitializationStatus::Init {
+                    addresses: addresses.clone(),
+                }
+            }
+            (a, b) => a.merge(b),
+        }
+    }
+}
+
 impl AbstractDomain for InitializationStatus {
+    /// merges in the sense for merging blocks (Init + Uninit = MaybeInint)
     fn merge(&self, other: &Self) -> Self {
         match (self, other) {
             (
@@ -31,11 +47,6 @@ impl AbstractDomain for InitializationStatus {
                 InitializationStatus::Uninit
             }
 
-            (InitializationStatus::Init { addresses }, InitializationStatus::Uninit) => {
-                InitializationStatus::MaybeInit {
-                    addresses: addresses.clone(),
-                }
-            }
             (
                 InitializationStatus::MaybeInit { addresses },
                 InitializationStatus::Init { addresses: a },
@@ -43,27 +54,26 @@ impl AbstractDomain for InitializationStatus {
             | (
                 InitializationStatus::MaybeInit { addresses },
                 InitializationStatus::MaybeInit { addresses: a },
-            ) => InitializationStatus::MaybeInit {
-                addresses: addresses.union(a).cloned().collect(),
-            },
-            (InitializationStatus::MaybeInit { addresses }, InitializationStatus::Uninit)
-            | (InitializationStatus::Uninit, InitializationStatus::Init { addresses })
-            | (InitializationStatus::Uninit, InitializationStatus::MaybeInit { addresses }) => {
-                InitializationStatus::MaybeInit {
-                    addresses: addresses.clone(),
-                }
-            }
-            (
+            )
+            | (
                 InitializationStatus::Init { addresses },
                 InitializationStatus::MaybeInit { addresses: a },
             ) => InitializationStatus::MaybeInit {
                 addresses: addresses.union(a).cloned().collect(),
             },
+            (InitializationStatus::MaybeInit { addresses }, InitializationStatus::Uninit)
+            | (InitializationStatus::Uninit, InitializationStatus::Init { addresses })
+            | (InitializationStatus::Uninit, InitializationStatus::MaybeInit { addresses })
+            | (InitializationStatus::Init { addresses }, InitializationStatus::Uninit) => {
+                InitializationStatus::MaybeInit {
+                    addresses: addresses.clone(),
+                }
+            }
         }
     }
 
     fn is_top(&self) -> bool {
-        if let &InitializationStatus::MaybeInit { .. } = self {
+        if let &InitializationStatus::Uninit = self {
             return true;
         }
         false
@@ -76,17 +86,13 @@ impl SizedDomain for InitializationStatus {
     }
 
     fn new_top(_bytesize: ByteSize) -> Self {
-        InitializationStatus::MaybeInit {
-            addresses: [].into(),
-        }
+        InitializationStatus::Uninit
     }
 }
 
 impl HasTop for InitializationStatus {
     fn top(&self) -> Self {
-        InitializationStatus::MaybeInit {
-            addresses: [].into(),
-        }
+        InitializationStatus::Uninit
     }
 }
 
@@ -122,7 +128,7 @@ impl MemRegion<InitializationStatus> {
         false
     }
 
-    // Inserts an `InitalizationStatus` at multiple offsets, utilizing the `merge()` function.
+    /// Inserts an `InitalizationStatus` at multiple offsets, utilizing the `merge()` function.
     pub fn insert_interval(&mut self, status: &InitializationStatus, interval: &IntervalDomain) {
         let (lower_bound, higher_bound) = interval.try_to_offset_interval().unwrap();
         for i in lower_bound..=higher_bound {
@@ -160,7 +166,6 @@ impl<'a> crate::analysis::forward_interprocedural_fixpoint::Context<'a> for Cont
     /// Both sets are combined, but if the status the same memory object is initialized
     /// and uninitialized, the status is set to `MaybeInit`.
     fn merge(&self, value1: &Self::Value, value2: &Self::Value) -> Self::Value {
-        dbg!("mergein", &value1, &value2);
         let mut merged = value1.clone();
         for (id, mem_region) in value2.iter() {
             if merged.contains_key(id) {
@@ -176,7 +181,7 @@ impl<'a> crate::analysis::forward_interprocedural_fixpoint::Context<'a> for Cont
             }
         }
 
-        dbg!(merged)
+        merged
     }
 
     /// Changes the `InitalizationStatus` of an `Uninit` memory object to `Init`, if a `Store` instruction
@@ -192,16 +197,19 @@ impl<'a> crate::analysis::forward_interprocedural_fixpoint::Context<'a> for Cont
                     if value.contains_key(id) {
                         // We track this mem object
                         let (offset_start, offset_end) = interval.try_to_offset_interval().unwrap();
-                        let mut updated_value = value.clone();
+                        let mut updated_value = value.get(id).unwrap().clone();
                         for offset in offset_start..=offset_end {
-                            updated_value.get(id).unwrap().clone().insert_at_byte_index(
-                                InitializationStatus::Init {
-                                    addresses: [].into(),
-                                },
+                            let old_status = updated_value.get_init_status_at_byte_index(offset);
+                            updated_value.insert_at_byte_index(
+                                old_status.merge_precise(&InitializationStatus::Init {
+                                    addresses: [def.tid.clone()].into(),
+                                }),
                                 offset,
-                            ); // TODO: reuse merge somehow
+                            );
                         }
-                        return Some(updated_value);
+                        let mut update = value.clone();
+                        update.insert(id.clone(), updated_value.clone()).unwrap();
+                        return Some(update);
                     }
                 }
             }

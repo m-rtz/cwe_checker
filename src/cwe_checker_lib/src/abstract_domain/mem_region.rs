@@ -119,6 +119,7 @@ impl<T: AbstractDomain + SizedDomain + HasTop + std::fmt::Debug> MemRegion<T> {
 
     /// Insert a value into the memory region at the given position.
     /// The position is the index (in bytes) in the memory region.
+    /// Top values are not inserted, as they don't contain information anyway.
     pub fn insert_at_byte_index(&mut self, value: T, position: i64) {
         let size_in_bytes = u64::from(value.bytesize()) as i64;
         assert!(size_in_bytes > 0);

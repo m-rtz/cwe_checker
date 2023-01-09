@@ -92,13 +92,13 @@ fn find_abstract_identifier(tid: &Tid, state: &State) -> Option<AbstractIdentifi
 fn init_heap_allocation<'a>(
     computation: &mut Computation<GeneralizedContext<'a, Context<'a>>>,
     alloc_calls: &Vec<(Tid, NodeIndex)>,
-    symbol_map: HashMap<Tid, &ExternSymbol>,
+    address_bytesize: ByteSize,
     pir: &PointerInference,
 ) {
     for (call, node) in alloc_calls {
         if let Some(fp_node_value) = pir.get_node_value(*node) {
             if let Some(id) = find_abstract_identifier(call, fp_node_value.unwrap_value()) {
-                let mem_region = MemRegion::new(ByteSize::new(8));
+                let mem_region = MemRegion::new(address_bytesize);
                 let value = HashMap::from([(id, mem_region)]);
                 computation.set_node_value(
                     *node,
@@ -108,25 +108,6 @@ fn init_heap_allocation<'a>(
             }
         }
     }
-}
-
-fn compute<'a>(
-    graph: &'a Graph,
-    pir: &'a PointerInference<'a>,
-    alloc_calls: Vec<(Tid, NodeIndex)>,
-    symbol_map: HashMap<Tid, &ExternSymbol>,
-) -> Computation<GeneralizedContext<'a, Context<'a>>> {
-    let context = Context::new(graph, pir);
-    let mut computation = create_computation(context, None);
-
-    init_heap_allocation(&mut computation, &alloc_calls, symbol_map, pir);
-    computation.compute_with_max_steps(100);
-
-    if !computation.has_stabilized() {
-        panic!("Fixpoint for expression propagation did not stabilize.");
-    }
-
-    computation
 }
 
 /// Generate the CWE warning for a detected instance of the CWE.
@@ -186,7 +167,6 @@ fn find_uninit_access_in_blk<'a>(
                                     },
                                     data_domain.get_relative_values().get(id).unwrap(),
                                 );
-                                println!("is Initalized here!")
                             }
                         }
                     }
@@ -227,19 +207,27 @@ pub fn check_cwe(
     cwe_params: &serde_json::Value,
 ) -> (Vec<LogMessage>, Vec<CweWarning>) {
     let config: Config = serde_json::from_value(cwe_params.clone()).unwrap();
-    let results = analysis_results.pointer_inference.unwrap();
+    let pir = analysis_results.pointer_inference.unwrap();
 
     let symbol_map = get_symbol_map(analysis_results.project, &config.symbols);
 
     let allocation_target_nodes =
-        find_allocation_returnsites(config.symbols, results.get_graph(), analysis_results);
-
-    let computation = compute(
-        results.get_graph(),
-        results,
-        allocation_target_nodes,
-        symbol_map,
+        find_allocation_returnsites(config.symbols, pir.get_graph(), analysis_results);
+    let context = Context::new(pir.get_graph(), pir);
+    let mut computation = create_computation(context, None);
+    init_heap_allocation(
+        &mut computation,
+        &allocation_target_nodes,
+        ByteSize::new(analysis_results.project.get_pointer_bytesize().into()),
+        pir,
     );
+
+    computation.compute_with_max_steps(100);
+
+    if !computation.has_stabilized() {
+        panic!("Fixpoint for expression propagation did not stabilize.");
+    }
+
     let mut cwe_warnings = extract_results(computation);
     cwe_warnings.dedup();
 
