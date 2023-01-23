@@ -119,24 +119,33 @@ impl MemRegion<InitializationStatus> {
     ///
     /// Note that values not set are treated as `InitalizationStatus::Uninit`.
     pub fn contains_uninit_within_interval(&self, interval: &IntervalDomain) -> bool {
-        let (lower_bound, higher_bound) = interval.try_to_offset_interval().unwrap();
-        for i in lower_bound..=higher_bound {
-            if let InitializationStatus::Uninit = self.get_init_status_at_byte_index(i) {
-                return true;
+        if let Ok((lower_bound, higher_bound)) = interval.try_to_offset_interval() {
+            for i in lower_bound..=higher_bound {
+                if let InitializationStatus::Uninit = self.get_init_status_at_byte_index(i) {
+                    return true;
+                }
             }
+            false
+        } else {
+            println!("could not determine offset interval, so cosider it uninit!");
+            true
         }
-        false
     }
 
     /// Inserts an `InitalizationStatus` at multiple offsets, utilizing the `merge()` function.
     pub fn insert_interval(&mut self, status: &InitializationStatus, interval: &IntervalDomain) {
-        let (lower_bound, higher_bound) = interval.try_to_offset_interval().unwrap();
-        for i in lower_bound..=higher_bound {
-            if let Some(init_status) = self.entry_map().get(&i) {
-                self.insert_at_byte_index(init_status.merge(status), i);
-            } else {
-                self.insert_at_byte_index(InitializationStatus::Uninit.merge(status), i);
+        if let Ok((lower_bound, higher_bound)) = interval.try_to_offset_interval() {
+            for i in lower_bound..=higher_bound {
+                if let Some(init_status) = self.entry_map().get(&i) {
+                    self.insert_at_byte_index(init_status.merge(status), i);
+                } else {
+                    self.insert_at_byte_index(InitializationStatus::Uninit.merge(status), i);
+                }
             }
+        } else {
+            println!(
+                "provided interval can not be turned into offset interval... find a solution here!"
+            )
         }
     }
 }
@@ -177,7 +186,7 @@ impl<'a> crate::analysis::forward_interprocedural_fixpoint::Context<'a> for Cont
                     );
                 }
             } else {
-                merged.insert(id.clone(), mem_region.clone()).unwrap();
+                merged.insert(id.clone(), mem_region.clone());
             }
         }
 
@@ -186,30 +195,32 @@ impl<'a> crate::analysis::forward_interprocedural_fixpoint::Context<'a> for Cont
 
     /// Changes the `InitalizationStatus` of an `Uninit` memory object to `Init`, if a `Store` instruction
     /// manipulates the memory object.
-    fn update_def(
-        &self,
-        value: &Self::Value,
-        def: &crate::intermediate_representation::Term<crate::intermediate_representation::Def>,
-    ) -> Option<Self::Value> {
+    fn update_def(&self, value: &Self::Value, def: &Term<Def>) -> Option<Self::Value> {
+        println!("{} @ {}", &def.term, &def.tid);
         if let Def::Store { .. } = &def.term {
             if let Some(data_domain) = self.pir.eval_address_at_def(&def.tid) {
                 for (id, interval) in data_domain.get_relative_values().iter() {
                     if value.contains_key(id) {
                         // We track this mem object
-                        let (offset_start, offset_end) = interval.try_to_offset_interval().unwrap();
-                        let mut updated_value = value.get(id).unwrap().clone();
-                        for offset in offset_start..=offset_end {
-                            let old_status = updated_value.get_init_status_at_byte_index(offset);
-                            updated_value.insert_at_byte_index(
-                                old_status.merge_precise(&InitializationStatus::Init {
-                                    addresses: [def.tid.clone()].into(),
-                                }),
-                                offset,
-                            );
+                        //dbg!( id, interval);
+                        if let Ok((offset_start, offset_end)) = interval.try_to_offset_interval() {
+                            let mut updated_value = value.get(id).unwrap().clone();
+                            for offset in offset_start..=offset_end {
+                                let old_status =
+                                    updated_value.get_init_status_at_byte_index(offset);
+                                updated_value.insert_at_byte_index(
+                                    old_status.merge_precise(&InitializationStatus::Init {
+                                        addresses: [def.tid.clone()].into(),
+                                    }),
+                                    offset,
+                                );
+                            }
+                            let mut update = value.clone();
+                            update.insert(id.clone(), updated_value.clone()).unwrap();
+                            return Some(update);
+                        } else {
+                            println!("interval was top");
                         }
-                        let mut update = value.clone();
-                        update.insert(id.clone(), updated_value.clone()).unwrap();
-                        return Some(update);
                     }
                 }
             }

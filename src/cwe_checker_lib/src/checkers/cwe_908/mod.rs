@@ -3,6 +3,7 @@ mod context;
 use std::{
     borrow::BorrowMut,
     collections::{HashMap, HashSet},
+    ops::DerefMut,
 };
 
 use crate::{
@@ -55,21 +56,20 @@ fn find_allocation_returnsites(
     graph: &Graph,
     analysis_results: &AnalysisResults,
 ) -> Vec<(Tid, NodeIndex)> {
-    let symbols: Vec<&Tid> = symbols
-        .iter()
-        .map(|x| {
-            find_symbol(&analysis_results.project.program, x)
-                .expect(&format!("Could not find symbol: {}", x))
-                .0 // TODO: not fast fail
-        })
-        .collect();
+    let mut symbol_tids = vec![];
+    for sym in symbols{
+        
+        if let Some((tid, name)) = find_symbol(&analysis_results.project.program, &sym){
+            symbol_tids.push(tid);
+        }
+    }
 
     let mut return_nodes = vec![];
 
     for edge in graph.edge_indices() {
         if let Edge::ExternCallStub(jmp) = graph[edge] {
             if let Jmp::Call { target, .. } = &jmp.term {
-                if symbols.contains(&target) {
+                if symbol_tids.contains(&target) {
                     return_nodes.push((jmp.tid.clone(), graph.edge_endpoints(edge).unwrap().1));
                 }
             }
@@ -90,16 +90,18 @@ fn find_abstract_identifier(tid: &Tid, state: &State) -> Option<AbstractIdentifi
 }
 
 fn init_heap_allocation<'a>(
-    computation: &mut Computation<GeneralizedContext<'a, Context<'a>>>,
+    mut computation: Computation<GeneralizedContext<'a, Context<'a>>>,
     alloc_calls: &Vec<(Tid, NodeIndex)>,
     address_bytesize: ByteSize,
     pir: &PointerInference,
-) {
+) -> Computation<GeneralizedContext<'a, Context<'a>>> {
     for (call, node) in alloc_calls {
         if let Some(fp_node_value) = pir.get_node_value(*node) {
             if let Some(id) = find_abstract_identifier(call, fp_node_value.unwrap_value()) {
+                println!("heap init id: {}", &id);
                 let mem_region = MemRegion::new(address_bytesize);
                 let value = HashMap::from([(id, mem_region)]);
+
                 computation.set_node_value(
                     *node,
                     analysis::interprocedural_fixpoint_generic::NodeValue::Value(value),
@@ -108,6 +110,58 @@ fn init_heap_allocation<'a>(
             }
         }
     }
+    computation
+}
+
+fn init_stack_allocation<'a>(
+    mut computation: Computation<GeneralizedContext<'a, Context<'a>>>,
+    address_bytesize: ByteSize,
+    pir: &PointerInference,
+) -> Computation<GeneralizedContext<'a, Context<'a>>> {
+    let graph = computation.get_graph().clone();
+    let stack_pointer_register = &pir.get_context().project.stack_pointer_register;
+    for node in graph.node_indices() {
+        if let Node::BlkStart(_, _) = graph[node] {
+            for def in &graph[node].get_block().term.defs {
+                if let Def::Assign { var, value } = &def.term {
+                    if var == stack_pointer_register {
+                        if let Expression::BinOp { op, lhs, rhs } = value {
+                            // Maybe also ensure that stack_pointer is part of expression
+                            if op == &BinOpType::IntSub {
+                                // Here we have a decreasing stack_pointer situation
+                                println!("{} @ {}", &def.term, &def.tid);
+                                println!(
+                                    "{:?}",
+                                    match pir.eval_value_at_def(&def.tid) {
+                                        Some(x) => x.to_json_compact(),
+                                        None => "is top :(".into(),
+                                    }
+                                );
+
+                                //println!("stack init id: {:?}", pir.get_node_value(node).unwrap().unwrap_value().stack_id);
+
+                                let stack_id = pir
+                                    .get_node_value(node)
+                                    .unwrap()
+                                    .unwrap_value()
+                                    .stack_id
+                                    .clone();
+                                let mem_region = MemRegion::new(address_bytesize);
+                                let value = HashMap::from([(stack_id, mem_region)]);
+                                computation.set_node_value(
+                                    node,
+                                    analysis::interprocedural_fixpoint_generic::NodeValue::Value(
+                                        value,
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    computation
 }
 
 /// Generate the CWE warning for a detected instance of the CWE.
@@ -147,7 +201,12 @@ fn find_uninit_access_in_blk<'a>(
                             if mem_region.contains_uninit_within_interval(
                                 data_domain.get_relative_values().get(id).unwrap(),
                             ) {
-                                cwe_warnings.push(generate_cwe_warning(&def.tid, false))
+                                if id.to_string().contains("instr"){
+                                    cwe_warnings.push(generate_cwe_warning(&def.tid, false))
+                                } else {
+                                    cwe_warnings.push(generate_cwe_warning(&def.tid, true))
+                                }
+                                
                             }
                         }
                     }
@@ -184,20 +243,21 @@ fn extract_results<'a>(
     let mut cwe_warnings = Vec::new();
     let graph = computation.get_graph();
     for node in graph.node_indices() {
-        if let Some(node_value) = computation.get_node_value(node) {
-            // only consider nodes with uninitalized memory
-
-            {
-                cwe_warnings.append(
-                    find_uninit_access_in_blk(
-                        &computation,
-                        node_value.unwrap_value(),
-                        &computation.get_graph()[node].get_block().term,
-                    )
-                    .as_mut(),
-                );
+        if let Node::BlkStart(_, _) | Node::BlkEnd(_, _) = graph[node] {
+            if let Some(node_value) = computation.get_node_value(node) {
+                {
+                    cwe_warnings.append(
+                        find_uninit_access_in_blk(
+                            &computation,
+                            node_value.unwrap_value(),
+                            &computation.get_graph()[node].get_block().term,
+                        )
+                        .as_mut(),
+                    );
+                }
             }
         }
+        
     }
     cwe_warnings
 }
@@ -214,21 +274,32 @@ pub fn check_cwe(
     let allocation_target_nodes =
         find_allocation_returnsites(config.symbols, pir.get_graph(), analysis_results);
     let context = Context::new(pir.get_graph(), pir);
-    let mut computation = create_computation(context, None);
-    init_heap_allocation(
-        &mut computation,
+    let computation = create_computation(context, None);
+    let computation = init_stack_allocation(
+        computation,
+        ByteSize::new(analysis_results.project.get_pointer_bytesize().into()),
+        pir,
+    );
+    let mut computation = init_heap_allocation(
+        computation,
         &allocation_target_nodes,
         ByteSize::new(analysis_results.project.get_pointer_bytesize().into()),
         pir,
     );
-
+    println!(
+        "\n#################################\n START COMPUTING FIXPOINT\n#################################"
+    );
     computation.compute_with_max_steps(100);
+    println!(
+        "\n#################################\n END COMPUTING FIXPOINT\n#################################"
+    );
 
     if !computation.has_stabilized() {
         panic!("Fixpoint for expression propagation did not stabilize.");
     }
 
     let mut cwe_warnings = extract_results(computation);
+    println!("\n###########\nFinal Results\n#########");
     cwe_warnings.dedup();
 
     (vec![], cwe_warnings)
