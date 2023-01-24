@@ -117,17 +117,30 @@ impl MemRegion<InitializationStatus> {
     /// Returns true if the `MemRegion` contains at least one `InitalizationStatus::Uninit` value
     /// within the given offset interval.
     ///
-    /// Note that values not set are treated as `InitalizationStatus::Uninit`.
-    pub fn contains_uninit_within_interval(&self, interval: &IntervalDomain) -> bool {
-        if let Ok((lower_bound, higher_bound)) = interval.try_to_offset_interval() {
-            for i in lower_bound..=higher_bound {
+    /// Note that values not set are treated as `InitalizationStatus::Uninit`. Positive offsets can be ignored, which
+    /// in fact treats them as initialized.
+    pub fn contains_uninit_within_interval(
+        &self,
+        interval: &IntervalDomain,
+        ignore_non_neg_offsets: bool,
+    ) -> bool {
+        if let Ok((lower_bound, upper_bound)) = interval.try_to_offset_interval().as_mut() {
+            if ignore_non_neg_offsets {
+                if *lower_bound > 0 && *upper_bound > 0 {
+                    return false;
+                } else if *lower_bound > 0 {
+                    *lower_bound = 0;
+                }
+            }
+            println!("\t\t\t bounds: {} - {}", lower_bound, upper_bound);
+            for i in *lower_bound..=*upper_bound {
                 if let InitializationStatus::Uninit = self.get_init_status_at_byte_index(i) {
                     return true;
                 }
             }
             false
         } else {
-            println!("could not determine offset interval, so cosider it uninit!");
+            println!("could not determine offset interval, so consider it uninit!");
             true
         }
     }

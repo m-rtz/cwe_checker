@@ -1,27 +1,21 @@
 mod context;
 
 use std::{
-    borrow::BorrowMut,
-    collections::{HashMap, HashSet},
-    ops::DerefMut,
+    collections::{HashMap},
 };
 
 use crate::{
-    abstract_domain::{AbstractIdentifier, IntervalDomain, MemRegion},
+    abstract_domain::{AbstractIdentifier, MemRegion},
     analysis::{
         self,
         fixpoint::Computation,
         forward_interprocedural_fixpoint::{create_computation, GeneralizedContext},
         graph::Edge,
-        interprocedural_fixpoint_generic::NodeValue,
         pointer_inference::{PointerInference, State},
         vsa_results::VsaResult,
     },
     intermediate_representation::*,
-    utils::symbol_utils::get_symbol_map,
 };
-use apint::ApInt;
-use itertools::Itertools;
 use petgraph::graph::NodeIndex;
 use serde::{Deserialize, Serialize};
 
@@ -57,9 +51,8 @@ fn find_allocation_returnsites(
     analysis_results: &AnalysisResults,
 ) -> Vec<(Tid, NodeIndex)> {
     let mut symbol_tids = vec![];
-    for sym in symbols{
-        
-        if let Some((tid, name)) = find_symbol(&analysis_results.project.program, &sym){
+    for sym in symbols {
+        if let Some((tid, _name)) = find_symbol(&analysis_results.project.program, &sym) {
             symbol_tids.push(tid);
         }
     }
@@ -122,21 +115,14 @@ fn init_stack_allocation<'a>(
     let stack_pointer_register = &pir.get_context().project.stack_pointer_register;
     for node in graph.node_indices() {
         if let Node::BlkStart(_, _) = graph[node] {
+            // OVERKILL: Iterating subs should be enough for init stack frames.
             for def in &graph[node].get_block().term.defs {
                 if let Def::Assign { var, value } = &def.term {
                     if var == stack_pointer_register {
-                        if let Expression::BinOp { op, lhs, rhs } = value {
+                        if let Expression::BinOp { op, lhs: _, rhs: _ } = value {
                             // Maybe also ensure that stack_pointer is part of expression
                             if op == &BinOpType::IntSub {
                                 // Here we have a decreasing stack_pointer situation
-                                println!("{} @ {}", &def.term, &def.tid);
-                                println!(
-                                    "{:?}",
-                                    match pir.eval_value_at_def(&def.tid) {
-                                        Some(x) => x.to_json_compact(),
-                                        None => "is top :(".into(),
-                                    }
-                                );
 
                                 //println!("stack init id: {:?}", pir.get_node_value(node).unwrap().unwrap_value().stack_id);
 
@@ -146,7 +132,13 @@ fn init_stack_allocation<'a>(
                                     .unwrap_value()
                                     .stack_id
                                     .clone();
-                                let mem_region = MemRegion::new(address_bytesize);
+                                let mut mem_region = MemRegion::new(address_bytesize);
+                                mem_region.insert_at_byte_index(
+                                    InitializationStatus::Init {
+                                        addresses: [Tid::new("Return Address")].into(),
+                                    },
+                                    0,
+                                );
                                 let value = HashMap::from([(stack_id, mem_region)]);
                                 computation.set_node_value(
                                     node,
@@ -193,20 +185,35 @@ fn find_uninit_access_in_blk<'a>(
     let mut cwe_warnings = Vec::new();
 
     for def in &blk.defs {
+        println!("\t{}: {}", def.tid.address, def.term);
         match &def.term {
             Def::Load { .. } => {
                 if let Some(data_domain) = pir.eval_address_at_def(&def.tid) {
                     for id in data_domain.get_relative_values().keys() {
                         if let Some(mem_region) = value.get(id) {
-                            if mem_region.contains_uninit_within_interval(
-                                data_domain.get_relative_values().get(id).unwrap(),
-                            ) {
-                                if id.to_string().contains("instr"){
+                            if id.to_string().contains("instr") {
+                                // it is a heap object
+                                if mem_region.contains_uninit_within_interval(
+                                    data_domain.get_relative_values().get(id).unwrap(),
+                                    false,
+                                ) {
                                     cwe_warnings.push(generate_cwe_warning(&def.tid, false))
-                                } else {
+                                }
+                            } else {
+                                println!("\t\t{}", id);
+
+                                println!("\t\t{:?}", mem_region);
+                                println!(
+                                    "\t\t{}",
+                                    data_domain.get_relative_values().get(id).unwrap()
+                                );
+                                // it is a stack frame
+                                if mem_region.contains_uninit_within_interval(
+                                    data_domain.get_relative_values().get(id).unwrap(),
+                                    true,
+                                ) {
                                     cwe_warnings.push(generate_cwe_warning(&def.tid, true))
                                 }
-                                
                             }
                         }
                     }
@@ -219,6 +226,7 @@ fn find_uninit_access_in_blk<'a>(
                             // mem_region contains uninit within the interval of interest. Change it!
                             if mem_region.contains_uninit_within_interval(
                                 data_domain.get_relative_values().get(id).unwrap(),
+                                false,
                             ) {
                                 mem_region.insert_interval(
                                     &InitializationStatus::Init {
@@ -245,19 +253,17 @@ fn extract_results<'a>(
     for node in graph.node_indices() {
         if let Node::BlkStart(_, _) | Node::BlkEnd(_, _) = graph[node] {
             if let Some(node_value) = computation.get_node_value(node) {
-                {
-                    cwe_warnings.append(
-                        find_uninit_access_in_blk(
-                            &computation,
-                            node_value.unwrap_value(),
-                            &computation.get_graph()[node].get_block().term,
-                        )
-                        .as_mut(),
-                    );
-                }
+                println!("\n{}", graph[node]);
+                cwe_warnings.append(
+                    find_uninit_access_in_blk(
+                        &computation,
+                        node_value.unwrap_value(),
+                        &computation.get_graph()[node].get_block().term,
+                    )
+                    .as_mut(),
+                );
             }
         }
-        
     }
     cwe_warnings
 }
@@ -266,26 +272,22 @@ pub fn check_cwe(
     analysis_results: &AnalysisResults,
     cwe_params: &serde_json::Value,
 ) -> (Vec<LogMessage>, Vec<CweWarning>) {
+    let pointer_size = analysis_results.project.get_pointer_bytesize();
     let config: Config = serde_json::from_value(cwe_params.clone()).unwrap();
     let pir = analysis_results.pointer_inference.unwrap();
 
-    let symbol_map = get_symbol_map(analysis_results.project, &config.symbols);
+    //let symbol_map = get_symbol_map(analysis_results.project, &config.symbols);
 
     let allocation_target_nodes =
         find_allocation_returnsites(config.symbols, pir.get_graph(), analysis_results);
     let context = Context::new(pir.get_graph(), pir);
+
+    print_graph(pir.get_graph());
+
     let computation = create_computation(context, None);
-    let computation = init_stack_allocation(
-        computation,
-        ByteSize::new(analysis_results.project.get_pointer_bytesize().into()),
-        pir,
-    );
-    let mut computation = init_heap_allocation(
-        computation,
-        &allocation_target_nodes,
-        ByteSize::new(analysis_results.project.get_pointer_bytesize().into()),
-        pir,
-    );
+    let computation = init_stack_allocation(computation, pointer_size, pir);
+    let mut computation =
+        init_heap_allocation(computation, &allocation_target_nodes, pointer_size, pir);
     println!(
         "\n#################################\n START COMPUTING FIXPOINT\n#################################"
     );
@@ -303,4 +305,16 @@ pub fn check_cwe(
     cwe_warnings.dedup();
 
     (vec![], cwe_warnings)
+}
+
+fn print_graph(graph: &Graph) {
+    for node in graph.node_indices() {
+        if let Node::BlkStart(blk, sub) = graph[node] {
+            println!("blk: {} @ {}", blk.tid, blk.tid.address);
+            for def in &blk.term.defs {
+                println!("\t{}: {}", def.tid, def.term)
+            }
+            println!()
+        }
+    }
 }
