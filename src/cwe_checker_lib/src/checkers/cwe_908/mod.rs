@@ -1,8 +1,6 @@
 mod context;
 
-use std::{
-    collections::{HashMap},
-};
+use std::collections::HashMap;
 
 use crate::{
     abstract_domain::{AbstractIdentifier, MemRegion},
@@ -112,43 +110,31 @@ fn init_stack_allocation<'a>(
     pir: &PointerInference,
 ) -> Computation<GeneralizedContext<'a, Context<'a>>> {
     let graph = computation.get_graph().clone();
-    let stack_pointer_register = &pir.get_context().project.stack_pointer_register;
+
     for node in graph.node_indices() {
-        if let Node::BlkStart(_, _) = graph[node] {
-            // OVERKILL: Iterating subs should be enough for init stack frames.
-            for def in &graph[node].get_block().term.defs {
-                if let Def::Assign { var, value } = &def.term {
-                    if var == stack_pointer_register {
-                        if let Expression::BinOp { op, lhs: _, rhs: _ } = value {
-                            // Maybe also ensure that stack_pointer is part of expression
-                            if op == &BinOpType::IntSub {
-                                // Here we have a decreasing stack_pointer situation
+        if let Node::BlkStart(blk, sub) = graph[node] {
+            if let Some(first_block) = sub.term.blocks.first() {
+                if first_block == blk {
+                    // blk is first block in sub
+                    let stack_id = pir
+                        .get_node_value(node)
+                        .unwrap()
+                        .unwrap_value()
+                        .stack_id
+                        .clone();
 
-                                //println!("stack init id: {:?}", pir.get_node_value(node).unwrap().unwrap_value().stack_id);
-
-                                let stack_id = pir
-                                    .get_node_value(node)
-                                    .unwrap()
-                                    .unwrap_value()
-                                    .stack_id
-                                    .clone();
-                                let mut mem_region = MemRegion::new(address_bytesize);
-                                mem_region.insert_at_byte_index(
-                                    InitializationStatus::Init {
-                                        addresses: [Tid::new("Return Address")].into(),
-                                    },
-                                    0,
-                                );
-                                let value = HashMap::from([(stack_id, mem_region)]);
-                                computation.set_node_value(
-                                    node,
-                                    analysis::interprocedural_fixpoint_generic::NodeValue::Value(
-                                        value,
-                                    ),
-                                );
-                            }
-                        }
-                    }
+                    let mut mem_region = MemRegion::new(address_bytesize);
+                    mem_region.insert_at_byte_index(
+                        InitializationStatus::Init {
+                            addresses: [Tid::new("Return Address")].into(),
+                        },
+                        0,
+                    );
+                    let value = HashMap::from([(stack_id, mem_region)]);
+                    computation.set_node_value(
+                        node,
+                        analysis::interprocedural_fixpoint_generic::NodeValue::Value(value),
+                    );
                 }
             }
         }
@@ -275,6 +261,14 @@ pub fn check_cwe(
     let pointer_size = analysis_results.project.get_pointer_bytesize();
     let config: Config = serde_json::from_value(cwe_params.clone()).unwrap();
     let pir = analysis_results.pointer_inference.unwrap();
+    let subs: Vec<&Term<Blk>> = analysis_results
+        .project
+        .program
+        .term
+        .subs
+        .values()
+        .map(|s| &s.term.blocks[0])
+        .collect();
 
     //let symbol_map = get_symbol_map(analysis_results.project, &config.symbols);
 
