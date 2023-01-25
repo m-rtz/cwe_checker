@@ -80,6 +80,10 @@ fn find_abstract_identifier(tid: &Tid, state: &State) -> Option<AbstractIdentifi
     None
 }
 
+/// Creates or updates a node's Value by adding a heap object.
+///
+/// The nodes after allocation calls are extended by the newly created heap object and an uninitialized `MemRegion`.
+/// Already assigned identifier-MemRegion pairs are kept.
 fn init_heap_allocation<'a>(
     mut computation: Computation<GeneralizedContext<'a, Context<'a>>>,
     alloc_calls: &Vec<(Tid, NodeIndex)>,
@@ -91,12 +95,17 @@ fn init_heap_allocation<'a>(
             if let Some(id) = find_abstract_identifier(call, fp_node_value.unwrap_value()) {
                 println!("heap init id: {}", &id);
                 let mem_region = MemRegion::new(address_bytesize);
-                let value = HashMap::from([(id, mem_region)]);
+                let mut value = HashMap::from([(id, mem_region)]);
 
+                if let Some(node_value) = computation.get_node_value(*node) {
+                    let old_value = node_value.unwrap_value().clone();
+                    value.extend(old_value);
+                }
                 computation.set_node_value(
                     *node,
                     analysis::interprocedural_fixpoint_generic::NodeValue::Value(value),
                 );
+
                 computation.get_node_value(*node).unwrap().unwrap_value();
             }
         }
@@ -104,6 +113,11 @@ fn init_heap_allocation<'a>(
     computation
 }
 
+/// Creates or updated the Value for every function's first block.
+///
+/// The new Value is associated to the first BlkStart-node of a function and adds the stack frame.
+/// Note that, the offset `0` is set as `InitializationStatus::Init` and represents the return address.
+/// Already assigned identifier-MemRegion pairs are kept.
 fn init_stack_allocation<'a>(
     mut computation: Computation<GeneralizedContext<'a, Context<'a>>>,
     address_bytesize: ByteSize,
@@ -130,7 +144,11 @@ fn init_stack_allocation<'a>(
                         },
                         0,
                     );
-                    let value = HashMap::from([(stack_id, mem_region)]);
+                    let mut value = HashMap::from([(stack_id, mem_region)]);
+                    if let Some(node_value) = computation.get_node_value(node) {
+                        let old_value = node_value.unwrap_value().clone();
+                        value.extend(old_value);
+                    }
                     computation.set_node_value(
                         node,
                         analysis::interprocedural_fixpoint_generic::NodeValue::Value(value),
