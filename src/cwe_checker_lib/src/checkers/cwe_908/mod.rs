@@ -1,7 +1,5 @@
 mod context;
 
-use std::collections::HashMap;
-
 use crate::{
     abstract_domain::{AbstractIdentifier, MemRegion},
     analysis::{
@@ -9,7 +7,7 @@ use crate::{
         fixpoint::Computation,
         forward_interprocedural_fixpoint::{create_computation, GeneralizedContext},
         graph::Edge,
-        pointer_inference::{PointerInference, State},
+        pointer_inference::{PointerInference, State as PiState},
         vsa_results::VsaResult,
     },
     intermediate_representation::*,
@@ -17,8 +15,7 @@ use crate::{
 use petgraph::graph::NodeIndex;
 use serde::{Deserialize, Serialize};
 
-use self::context::Context;
-use crate::checkers::cwe_908::context::InitializationStatus;
+use self::{context::Context, init_status::InitializationStatus, state::State};
 use crate::{
     analysis::graph::*,
     utils::{
@@ -27,6 +24,9 @@ use crate::{
     },
     AnalysisResults, CweModule,
 };
+
+mod init_status;
+mod state;
 
 /// The module name and version
 pub static CWE_MODULE: CweModule = CweModule {
@@ -73,7 +73,7 @@ fn get_allocation_return_sites(
 
 /// Resolves Tid of allocation function and the state of the return site to the
 /// AbstractIdentifier of the new mem object.
-fn get_abstract_identifier(tid: &Tid, state: &State) -> Option<AbstractIdentifier> {
+fn get_abstract_identifier(tid: &Tid, state: &PiState) -> Option<AbstractIdentifier> {
     for id in state.memory.get_all_object_ids() {
         if id.get_tid().address == tid.address {
             return Some(id);
@@ -97,11 +97,12 @@ fn init_heap_allocation<'a>(
             if let Some(id) = get_abstract_identifier(call, fp_node_value.unwrap_value()) {
                 println!("heap init id: {}", &id);
                 let mem_region = MemRegion::new(address_bytesize);
-                let mut value = HashMap::from([(id, mem_region)]);
+                let mut value = State::new();
+                value.tracked_objects.insert(id, mem_region);
 
                 if let Some(node_value) = computation.get_node_value(*node) {
                     let old_value = node_value.unwrap_value().clone();
-                    value.extend(old_value);
+                    value.tracked_objects.extend(old_value.tracked_objects);
                 }
                 computation.set_node_value(
                     *node,
@@ -146,10 +147,11 @@ fn init_stack_allocation<'a>(
                         },
                         0,
                     );
-                    let mut value = HashMap::from([(stack_id, mem_region)]);
+                    let mut value = State::new();
+                    value.tracked_objects.insert(stack_id, mem_region);
                     if let Some(node_value) = computation.get_node_value(node) {
                         let old_value = node_value.unwrap_value().clone();
-                        value.extend(old_value);
+                        value.tracked_objects.extend(old_value.tracked_objects);
                     }
                     computation.set_node_value(
                         node,
@@ -183,7 +185,7 @@ fn generate_cwe_warning(location: &Tid, is_stack_allocation: bool) -> CweWarning
 
 fn find_uninit_access_in_blk<'a>(
     computation: &Computation<GeneralizedContext<'a, Context<'a>>>,
-    value: &HashMap<AbstractIdentifier, MemRegion<InitializationStatus>>,
+    value: &State,
     blk: &Blk,
 ) -> Vec<CweWarning> {
     let pir = computation.get_context().get_context().pir;
@@ -196,7 +198,7 @@ fn find_uninit_access_in_blk<'a>(
             Def::Load { .. } => {
                 if let Some(data_domain) = pir.eval_address_at_def(&def.tid) {
                     for id in data_domain.get_relative_values().keys() {
-                        if let Some(mem_region) = value.get(id) {
+                        if let Some(mem_region) = value.tracked_objects.get(id) {
                             if id.to_string().contains("instr") {
                                 // it is a heap object
                                 if mem_region.contains_uninit_within_interval(
@@ -228,7 +230,7 @@ fn find_uninit_access_in_blk<'a>(
             Def::Store { .. } => {
                 if let Some(data_domain) = pir.eval_address_at_def(&def.tid) {
                     for id in data_domain.get_relative_values().keys() {
-                        if let Some(mem_region) = value.get_mut(id) {
+                        if let Some(mem_region) = value.tracked_objects.get_mut(id) {
                             // mem_region contains uninit within the interval of interest. Change it!
                             if mem_region.contains_uninit_within_interval(
                                 data_domain.get_relative_values().get(id).unwrap(),
