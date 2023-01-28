@@ -225,8 +225,11 @@
     ]
   },
   "CWE908": {
-    "symbols": [
+    "allocation_symbols": [
       "malloc"
+    ],
+    "extern_symbol_whitelist": [
+      "memfrob"
     ]
   },
   "check_path": {

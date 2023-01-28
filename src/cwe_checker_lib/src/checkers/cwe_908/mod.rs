@@ -39,11 +39,13 @@ pub static CWE_MODULE: CweModule = CweModule {
 /// Lists all extern symbols in consideration, which create a memory object.
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Hash, Clone)]
 pub struct Config {
-    symbols: Vec<String>,
+    allocation_symbols: Vec<String>,
+    extern_symbol_whitelist: Vec<String>,
 }
 
-// Returns all Nodes where a malloc call returns to and tid of malloc call.
-fn find_allocation_returnsites(
+/// For the provided symbols return the corresponding `Tid` of and `NodeIndex` of the return site.
+// TODO: iterating over graph can be combined with heap initialization!
+fn get_allocation_return_sites(
     symbols: Vec<String>,
     graph: &Graph,
     analysis_results: &AnalysisResults,
@@ -71,7 +73,7 @@ fn find_allocation_returnsites(
 
 /// Resolves Tid of allocation function and the state of the return site to the
 /// AbstractIdentifier of the new mem object.
-fn find_abstract_identifier(tid: &Tid, state: &State) -> Option<AbstractIdentifier> {
+fn get_abstract_identifier(tid: &Tid, state: &State) -> Option<AbstractIdentifier> {
     for id in state.memory.get_all_object_ids() {
         if id.get_tid().address == tid.address {
             return Some(id);
@@ -92,7 +94,7 @@ fn init_heap_allocation<'a>(
 ) -> Computation<GeneralizedContext<'a, Context<'a>>> {
     for (call, node) in alloc_calls {
         if let Some(fp_node_value) = pir.get_node_value(*node) {
-            if let Some(id) = find_abstract_identifier(call, fp_node_value.unwrap_value()) {
+            if let Some(id) = get_abstract_identifier(call, fp_node_value.unwrap_value()) {
                 println!("heap init id: {}", &id);
                 let mem_region = MemRegion::new(address_bytesize);
                 let mut value = HashMap::from([(id, mem_region)]);
@@ -189,7 +191,7 @@ fn find_uninit_access_in_blk<'a>(
     let mut cwe_warnings = Vec::new();
 
     for def in &blk.defs {
-        println!("\t{}: {}", def.tid.address, def.term);
+        //println!("\t{}: {}", def.tid.address, def.term);
         match &def.term {
             Def::Load { .. } => {
                 if let Some(data_domain) = pir.eval_address_at_def(&def.tid) {
@@ -204,13 +206,11 @@ fn find_uninit_access_in_blk<'a>(
                                     cwe_warnings.push(generate_cwe_warning(&def.tid, false))
                                 }
                             } else {
-                                println!("\t\t{}", id);
+                                //println!("\t\t{}", id);
 
-                                println!("\t\t{:?}", mem_region);
-                                println!(
-                                    "\t\t{}",
-                                    data_domain.get_relative_values().get(id).unwrap()
-                                );
+                                //println!("\t\t{:?}", mem_region);
+                                //println!(                                    "\t\t{}",                                    data_domain.get_relative_values().get(id).unwrap()                                );
+
                                 // it is a stack frame
                                 if mem_region.contains_uninit_within_interval(
                                     data_domain.get_relative_values().get(id).unwrap(),
@@ -219,6 +219,8 @@ fn find_uninit_access_in_blk<'a>(
                                     cwe_warnings.push(generate_cwe_warning(&def.tid, true))
                                 }
                             }
+                        } else {
+                            println!("Load from {id} here @ {}, but its not tracked (possible UAF):(. TODO: Consider it as uninit?", def.tid)
                         }
                     }
                 }
@@ -239,6 +241,8 @@ fn find_uninit_access_in_blk<'a>(
                                     data_domain.get_relative_values().get(id).unwrap(),
                                 );
                             }
+                        } else {
+                            println!("Store to {id} here @ {}, but object is not tracked (possible UAF) :( TODO: Add object?", def.tid);
                         }
                     }
                 }
@@ -257,7 +261,7 @@ fn extract_results<'a>(
     for node in graph.node_indices() {
         if let Node::BlkStart(_, _) | Node::BlkEnd(_, _) = graph[node] {
             if let Some(node_value) = computation.get_node_value(node) {
-                println!("\n{}", graph[node]);
+                //println!("\n{}", graph[node]);
                 cwe_warnings.append(
                     find_uninit_access_in_blk(
                         &computation,
@@ -279,20 +283,10 @@ pub fn check_cwe(
     let pointer_size = analysis_results.project.get_pointer_bytesize();
     let config: Config = serde_json::from_value(cwe_params.clone()).unwrap();
     let pir = analysis_results.pointer_inference.unwrap();
-    let subs: Vec<&Term<Blk>> = analysis_results
-        .project
-        .program
-        .term
-        .subs
-        .values()
-        .map(|s| &s.term.blocks[0])
-        .collect();
 
-    //let symbol_map = get_symbol_map(analysis_results.project, &config.symbols);
-
+    let context = Context::new(analysis_results, config.extern_symbol_whitelist.clone());
     let allocation_target_nodes =
-        find_allocation_returnsites(config.symbols, pir.get_graph(), analysis_results);
-    let context = Context::new(pir.get_graph(), pir);
+        get_allocation_return_sites(config.allocation_symbols, pir.get_graph(), analysis_results);
 
     print_graph(pir.get_graph());
 
