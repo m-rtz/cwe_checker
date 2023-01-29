@@ -62,30 +62,37 @@ impl<'a> Context<'a> {
         if let Some(target) = &params[0] {
             //TODO: Check if param[1] is not uninit
             if let Some(size) = &params[2] {
-                for (id, interval) in target.get_relative_values() {
+                for (id, target_interval) in target.get_relative_values() {
                     // TODO: if relative value is not unique, maybe set to MaybeInit
                     if value.tracked_objects.contains_key(id) {
-                        let target_offset = interval.try_to_offset_interval().unwrap().0; // Over approx here
-                        let size = size
-                            .get_if_absolute_value()
-                            .unwrap()
-                            .try_to_offset_interval()
-                            .unwrap()
-                            .1; // Over approx here
+                        let target_offset = match target_interval.try_to_offset_interval() {
+                            Ok(target_offset_interval) => target_offset_interval.0, //over approx here
+                            Err(_) => {
+                                println!("memset: offset interval was top. TODO: using 0 here?");
+                                0
+                            }
+                        };
 
-                        let mut new_state = value.clone();
-                        // TODO: maybe inserte as interval here
-                        for i in target_offset..(target_offset + size) {
-                            new_state.insert_single_offset(
-                                id,
-                                i,
-                                InitializationStatus::Init {
-                                    addresses: [call_tid.clone()].into(),
-                                },
-                            );
+                        if let Some(size_data_domain) = size.get_if_absolute_value() {
+                            if let Ok((size, _)) = size_data_domain.try_to_offset_interval() {
+                                // over approx here
+                                let mut new_state = value.clone();
+                                // TODO: maybe inserte as interval here
+                                for i in target_offset..(target_offset + size) {
+                                    new_state.insert_single_offset(
+                                        id,
+                                        i,
+                                        InitializationStatus::Init {
+                                            addresses: [call_tid.clone()].into(),
+                                        },
+                                    );
 
-                            return Some(new_state);
+                                    return Some(new_state);
+                                }
+                            }
                         }
+                        println!("We have no info about size paramter of memset :(\n TODO! Gonna do nothing for now...");
+                        return Some(value.clone());
                     } else {
                         println!("We are not tracking this mem object :(")
                     }

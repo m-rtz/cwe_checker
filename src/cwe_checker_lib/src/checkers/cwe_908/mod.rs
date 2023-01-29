@@ -3,7 +3,7 @@ mod context;
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    abstract_domain::{AbstractIdentifier, MemRegion},
+    abstract_domain::AbstractIdentifier,
     analysis::{
         self,
         fixpoint::Computation,
@@ -195,18 +195,18 @@ fn generate_cwe_warning_for_maybe_uninit_access(
     maybe_uninit_locations: HashMap<i64, HashSet<Tid>>,
 ) -> CweWarning {
     let mut description = format!(
-        "Access of potentially uninitialized {} variable at 0x{}.",
+        "Access of potentially uninitialized {} variable at 0x{}.\n",
         match is_stack_allocation {
             true => "stack",
             false => "heap",
         },
         location.address,
     );
-    description.push_str("Offset\tPotential initialization location");
+    description.push_str("Offset\tPotential initialization location\n");
     for (offset, init_locations) in maybe_uninit_locations {
         description.push_str(
             format!(
-                "{}\t{:?}",
+                "{}\t{:?}\n",
                 offset,
                 init_locations
                     .into_iter()
