@@ -1,11 +1,8 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use super::{state::State, InitializationStatus};
 use crate::{
-    abstract_domain::AbstractIdentifier,
-    abstract_domain::{
-        AbstractDomain, DataDomain, HasTop, IntervalDomain, MemRegion, SizedDomain, TryToInterval,
-    },
+    abstract_domain::{AbstractDomain, DataDomain, TryToInterval},
     analysis::{
         function_signature::FunctionSignature,
         graph::Graph,
@@ -40,6 +37,7 @@ impl<'a> Context<'a> {
         }
     }
 
+    /// Utilizes Pointer Inference for evaluating and returns all parameters of an `ExternSymbol`
     fn extract_parameters(
         &self,
         symbol: &ExternSymbol,
@@ -52,6 +50,7 @@ impl<'a> Context<'a> {
             .collect()
     }
 
+    /// All possible target memory objects of memset are set to `Init` according to offset and size.
     fn handle_memset(
         &self,
         call_tid: &Tid,
@@ -64,8 +63,8 @@ impl<'a> Context<'a> {
             //TODO: Check if param[1] is not uninit
             if let Some(size) = &params[2] {
                 for (id, interval) in target.get_relative_values() {
-                    // TODO: if relative value is not unique, maybe init as MaybeInit
-                    if let Some(mem_region) = value.tracked_objects.get(id) {
+                    // TODO: if relative value is not unique, maybe set to MaybeInit
+                    if value.tracked_objects.contains_key(id) {
                         let target_offset = interval.try_to_offset_interval().unwrap().0; // Over approx here
                         let size = size
                             .get_if_absolute_value()
@@ -73,18 +72,19 @@ impl<'a> Context<'a> {
                             .try_to_offset_interval()
                             .unwrap()
                             .1; // Over approx here
-                        let mut mem_region = mem_region.clone();
+
+                        let mut new_state = value.clone();
                         // TODO: maybe inserte as interval here
                         for i in target_offset..(target_offset + size) {
-                            mem_region.insert_at_byte_index(
+                            new_state.insert_single_offset(
+                                id,
+                                i,
                                 InitializationStatus::Init {
                                     addresses: [call_tid.clone()].into(),
                                 },
-                                i,
                             );
-                            let mut value = value.clone();
-                            value.tracked_objects.insert(id.clone(), mem_region);
-                            return Some(value);
+
+                            return Some(new_state);
                         }
                     } else {
                         println!("We are not tracking this mem object :(")
@@ -100,6 +100,7 @@ impl<'a> Context<'a> {
         None
     }
 
+    /// All possible target memory objects of memcpy are set to the status of all possible source memory objects w.r.t. their offsets.
     fn handle_memcpy(
         &self,
         call_tid: &Tid,
@@ -162,6 +163,7 @@ impl<'a> Context<'a> {
         None
     }
 
+    /// Removes all memory objects that are aguments to `free` from the state.
     fn handle_free(
         &self,
         call_tid: &Tid,
@@ -171,12 +173,15 @@ impl<'a> Context<'a> {
         println!("in handle_free");
         let params = self.extract_parameters(free_symbol, call_tid);
         if let Some(arg) = &params[0] {
-            for (id, interval) in arg.get_relative_values() {
+            // TODO: do we want to remove all potential objects?
+            for (id, _interval) in arg.get_relative_values() {
                 if let Some(a) = value.tracked_objects.get(id) {
                     println!("remove freed memory object");
                     let mut value = value.clone();
                     value.tracked_objects.remove(id);
                     return Some(value);
+                } else {
+                    println!("We do not track the freed object.")
                 }
             }
         }
@@ -198,20 +203,17 @@ impl<'a> crate::analysis::forward_interprocedural_fixpoint::Context<'a> for Cont
     /// and uninitialized, the status is set to `MaybeInit`.
     fn merge(&self, value1: &Self::Value, value2: &Self::Value) -> Self::Value {
         let mut merged = value1.clone();
-        for (id, mem_region) in value2.tracked_objects.iter() {
-            if merged.tracked_objects.contains_key(id) {
-                let mut mem_region = merged.tracked_objects.get(id).unwrap().clone();
-                for (i, status) in value2.tracked_objects.get(id).unwrap().entry_map().iter() {
-                    mem_region.insert_at_byte_index(
-                        mem_region.get_init_status_at_byte_index(*i).merge(status),
-                        *i,
-                    );
-                }
-            } else {
+
+        if let Some(intersection) = value1.get_intersecting_objects(&value2) {
+            for (id, (value1_mem_region, value2_mem_region)) in intersection {
                 merged
                     .tracked_objects
-                    .insert(id.clone(), mem_region.clone());
+                    .insert(id.clone(), value1_mem_region.merge(value2_mem_region));
             }
+        } else {
+            merged
+                .tracked_objects
+                .extend(value2.tracked_objects.clone())
         }
 
         merged
@@ -228,23 +230,19 @@ impl<'a> crate::analysis::forward_interprocedural_fixpoint::Context<'a> for Cont
                         // We track this mem object
                         //dbg!( id, interval);
                         if let Ok((offset_start, offset_end)) = interval.try_to_offset_interval() {
-                            let mut updated_value = value.tracked_objects.get(id).unwrap().clone();
+                            let mut updated = value.clone();
+
                             for offset in offset_start..=offset_end {
-                                let old_status =
-                                    updated_value.get_init_status_at_byte_index(offset);
-                                updated_value.insert_at_byte_index(
-                                    old_status.merge_precise(&InitializationStatus::Init {
-                                        addresses: [def.tid.clone()].into(),
-                                    }),
+                                updated.merge_precise_single_offset(
+                                    id,
                                     offset,
+                                    &InitializationStatus::Init {
+                                        addresses: [def.tid.clone()].into(),
+                                    },
                                 );
                             }
-                            let mut update = value.clone();
-                            update
-                                .tracked_objects
-                                .insert(id.clone(), updated_value.clone())
-                                .unwrap();
-                            return Some(update);
+
+                            return Some(updated);
                         } else {
                             println!("interval was top");
                         }

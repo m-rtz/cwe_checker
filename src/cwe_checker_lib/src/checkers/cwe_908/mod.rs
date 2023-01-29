@@ -96,17 +96,17 @@ fn init_heap_allocation<'a>(
         if let Some(fp_node_value) = pir.get_node_value(*node) {
             if let Some(id) = get_abstract_identifier(call, fp_node_value.unwrap_value()) {
                 println!("heap init id: {}", &id);
-                let mem_region = MemRegion::new(address_bytesize);
-                let mut value = State::new();
-                value.tracked_objects.insert(id, mem_region);
+
+                let mut state = State::new_with_id(id, address_bytesize);
 
                 if let Some(node_value) = computation.get_node_value(*node) {
-                    let old_value = node_value.unwrap_value().clone();
-                    value.tracked_objects.extend(old_value.tracked_objects);
+                    state
+                        .tracked_objects
+                        .extend(node_value.unwrap_value().tracked_objects.clone());
                 }
                 computation.set_node_value(
                     *node,
-                    analysis::interprocedural_fixpoint_generic::NodeValue::Value(value),
+                    analysis::interprocedural_fixpoint_generic::NodeValue::Value(state),
                 );
 
                 computation.get_node_value(*node).unwrap().unwrap_value();
@@ -140,22 +140,23 @@ fn init_stack_allocation<'a>(
                         .stack_id
                         .clone();
 
-                    let mut mem_region = MemRegion::new(address_bytesize);
-                    mem_region.insert_at_byte_index(
+                    let mut state = State::new_with_id(stack_id.clone(), address_bytesize);
+                    state.insert_single_offset(
+                        &stack_id,
+                        0,
                         InitializationStatus::Init {
                             addresses: [Tid::new("Return Address")].into(),
                         },
-                        0,
                     );
-                    let mut value = State::new();
-                    value.tracked_objects.insert(stack_id, mem_region);
+
                     if let Some(node_value) = computation.get_node_value(node) {
-                        let old_value = node_value.unwrap_value().clone();
-                        value.tracked_objects.extend(old_value.tracked_objects);
+                        state
+                            .tracked_objects
+                            .extend(node_value.unwrap_value().tracked_objects.clone());
                     }
                     computation.set_node_value(
                         node,
-                        analysis::interprocedural_fixpoint_generic::NodeValue::Value(value),
+                        analysis::interprocedural_fixpoint_generic::NodeValue::Value(state),
                     );
                 }
             }
@@ -197,12 +198,12 @@ fn find_uninit_access_in_blk<'a>(
         match &def.term {
             Def::Load { .. } => {
                 if let Some(data_domain) = pir.eval_address_at_def(&def.tid) {
-                    for id in data_domain.get_relative_values().keys() {
-                        if let Some(mem_region) = value.tracked_objects.get(id) {
-                            if id.to_string().contains("instr") {
+                    for source_id in data_domain.get_relative_values().keys() {
+                        if let Some(mem_region) = value.tracked_objects.get(source_id) {
+                            if source_id.to_string().contains("instr") {
                                 // it is a heap object
                                 if mem_region.contains_uninit_within_interval(
-                                    data_domain.get_relative_values().get(id).unwrap(),
+                                    data_domain.get_relative_values().get(source_id).unwrap(),
                                     false,
                                 ) {
                                     cwe_warnings.push(generate_cwe_warning(&def.tid, false))
@@ -215,36 +216,36 @@ fn find_uninit_access_in_blk<'a>(
 
                                 // it is a stack frame
                                 if mem_region.contains_uninit_within_interval(
-                                    data_domain.get_relative_values().get(id).unwrap(),
+                                    data_domain.get_relative_values().get(source_id).unwrap(),
                                     true,
                                 ) {
                                     cwe_warnings.push(generate_cwe_warning(&def.tid, true))
                                 }
                             }
                         } else {
-                            println!("Load from {id} here @ {}, but its not tracked (possible UAF):(. TODO: Consider it as uninit?", def.tid)
+                            println!("Load from {source_id} here @ {}, but its not tracked (possible UAF):(. TODO: Consider it as uninit?", def.tid)
                         }
                     }
                 }
             }
             Def::Store { .. } => {
                 if let Some(data_domain) = pir.eval_address_at_def(&def.tid) {
-                    for id in data_domain.get_relative_values().keys() {
-                        if let Some(mem_region) = value.tracked_objects.get_mut(id) {
+                    for target_id in data_domain.get_relative_values().keys() {
+                        if let Some(mem_region) = value.tracked_objects.get_mut(target_id) {
                             // mem_region contains uninit within the interval of interest. Change it!
                             if mem_region.contains_uninit_within_interval(
-                                data_domain.get_relative_values().get(id).unwrap(),
+                                data_domain.get_relative_values().get(target_id).unwrap(),
                                 false,
                             ) {
-                                mem_region.insert_interval(
+                                mem_region.merge_interval(
                                     &InitializationStatus::Init {
                                         addresses: [def.tid.clone()].into(),
                                     },
-                                    data_domain.get_relative_values().get(id).unwrap(),
+                                    data_domain.get_relative_values().get(target_id).unwrap(),
                                 );
                             }
                         } else {
-                            println!("Store to {id} here @ {}, but object is not tracked (possible UAF) :( TODO: Add object?", def.tid);
+                            println!("Store to {target_id} here @ {}, but object is not tracked (possible UAF) :( TODO: Add object?", def.tid);
                         }
                     }
                 }

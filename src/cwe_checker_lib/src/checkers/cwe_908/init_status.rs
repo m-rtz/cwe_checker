@@ -142,7 +142,7 @@ impl MemRegion<InitializationStatus> {
     }
 
     /// Inserts an `InitalizationStatus` at multiple offsets, utilizing the `merge()` function.
-    pub fn insert_interval(&mut self, status: &InitializationStatus, interval: &IntervalDomain) {
+    pub fn merge_interval(&mut self, status: &InitializationStatus, interval: &IntervalDomain) {
         if let Ok((lower_bound, higher_bound)) = interval.try_to_offset_interval() {
             for i in lower_bound..=higher_bound {
                 if let Some(init_status) = self.entry_map().get(&i) {
@@ -155,6 +155,30 @@ impl MemRegion<InitializationStatus> {
             println!(
                 "provided interval can not be turned into offset interval... find a solution here!"
             )
+        }
+    }
+
+    /// Merges `status` into `self` at `offset` utilizing `InitializationStatus::merge()`.
+    pub fn merge_at_byte_index(&mut self, offset: i64, status: &InitializationStatus) {
+        self.insert_at_byte_index(
+            self.get_init_status_at_byte_index(offset).merge(status),
+            offset,
+        )
+    }
+
+    /// Merges `status` into `self` at `offset` utilizing `InitializationStatus::merge_precise()`.
+    pub fn merge_precise_at_byte_index(&mut self, offset: i64, status: &InitializationStatus) {
+        self.insert_at_byte_index(
+            self.get_init_status_at_byte_index(offset)
+                .merge_precise(status),
+            offset,
+        )
+    }
+
+    /// Merges `other` MemRegion into `self` utilizing `MemRegion<InitializationStatus>::merge()`.
+    pub fn merge(&mut self, other: &MemRegion<InitializationStatus>) {
+        for (offset, status) in other.entry_map().iter() {
+            self.merge_at_byte_index(*offset, status);
         }
     }
 }
