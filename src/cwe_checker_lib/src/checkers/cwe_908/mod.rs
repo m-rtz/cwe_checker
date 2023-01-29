@@ -1,5 +1,7 @@
 mod context;
 
+use std::collections::{HashMap, HashSet};
+
 use crate::{
     abstract_domain::{AbstractIdentifier, MemRegion},
     analysis::{
@@ -166,12 +168,15 @@ fn init_stack_allocation<'a>(
 }
 
 /// Generate the CWE warning for a detected instance of the CWE.
-fn generate_cwe_warning(location: &Tid, is_stack_allocation: bool) -> CweWarning {
+fn generate_cwe_warning_for_uninit_access_(
+    location: &Tid,
+    is_stack_allocation: bool,
+) -> CweWarning {
     CweWarning::new(
         CWE_MODULE.name,
         CWE_MODULE.version,
         format!(
-            "Access of (potentially) uninitalized {} variable at 0x{}",
+            "Access of uninitialized {} variable at 0x{}",
             match is_stack_allocation {
                 true => "stack",
                 false => "heap",
@@ -182,6 +187,39 @@ fn generate_cwe_warning(location: &Tid, is_stack_allocation: bool) -> CweWarning
     .tids(vec![format!("{}", location)])
     .addresses(vec![location.address.clone()])
     .symbols(vec![])
+}
+
+fn generate_cwe_warning_for_maybe_uninit_access(
+    location: &Tid,
+    is_stack_allocation: bool,
+    maybe_uninit_locations: HashMap<i64, HashSet<Tid>>,
+) -> CweWarning {
+    let mut description = format!(
+        "Access of potentially uninitialized {} variable at 0x{}.",
+        match is_stack_allocation {
+            true => "stack",
+            false => "heap",
+        },
+        location.address,
+    );
+    description.push_str("Offset\tPotential initialization location");
+    for (offset, init_locations) in maybe_uninit_locations {
+        description.push_str(
+            format!(
+                "{}\t{:?}",
+                offset,
+                init_locations
+                    .into_iter()
+                    .map(|x| x.address)
+                    .collect::<Vec<String>>()
+            )
+            .as_str(),
+        );
+    }
+    CweWarning::new(CWE_MODULE.name, CWE_MODULE.version, description)
+        .tids(vec![format!("{}", location)])
+        .addresses(vec![location.address.clone()])
+        .symbols(vec![])
 }
 
 fn find_uninit_access_in_blk<'a>(
@@ -206,7 +244,19 @@ fn find_uninit_access_in_blk<'a>(
                                     data_domain.get_relative_values().get(source_id).unwrap(),
                                     false,
                                 ) {
-                                    cwe_warnings.push(generate_cwe_warning(&def.tid, false))
+                                    cwe_warnings.push(generate_cwe_warning_for_uninit_access_(
+                                        &def.tid, false,
+                                    ))
+                                }
+                                if let Some(maybe_init) = mem_region
+                                    .get_maybe_init_locatons_within_interval(
+                                        data_domain.get_relative_values().get(source_id).unwrap(),
+                                        false,
+                                    )
+                                {
+                                    cwe_warnings.push(generate_cwe_warning_for_maybe_uninit_access(
+                                        &def.tid, false, maybe_init,
+                                    ))
                                 }
                             } else {
                                 //println!("\t\t{}", id);
@@ -219,7 +269,19 @@ fn find_uninit_access_in_blk<'a>(
                                     data_domain.get_relative_values().get(source_id).unwrap(),
                                     true,
                                 ) {
-                                    cwe_warnings.push(generate_cwe_warning(&def.tid, true))
+                                    cwe_warnings.push(generate_cwe_warning_for_uninit_access_(
+                                        &def.tid, true,
+                                    ))
+                                }
+                                if let Some(maybe_init) = mem_region
+                                    .get_maybe_init_locatons_within_interval(
+                                        data_domain.get_relative_values().get(source_id).unwrap(),
+                                        false,
+                                    )
+                                {
+                                    cwe_warnings.push(generate_cwe_warning_for_maybe_uninit_access(
+                                        &def.tid, true, maybe_init,
+                                    ))
                                 }
                             }
                         } else {

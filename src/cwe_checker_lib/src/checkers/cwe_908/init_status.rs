@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::abstract_domain::TryToInterval;
 use crate::{
@@ -128,7 +128,6 @@ impl MemRegion<InitializationStatus> {
                     *lower_bound = 0;
                 }
             }
-            println!("\t\t\t bounds: {} - {}", lower_bound, upper_bound);
             for i in *lower_bound..=*upper_bound {
                 if let InitializationStatus::Uninit = self.get_init_status_at_byte_index(i) {
                     return true;
@@ -139,6 +138,38 @@ impl MemRegion<InitializationStatus> {
             println!("could not determine offset interval, so consider it uninit!");
             true
         }
+    }
+
+    pub fn get_maybe_init_locatons_within_interval(
+        &self,
+        interval: &IntervalDomain,
+        ignore_non_neg_offsets: bool,
+    ) -> Option<HashMap<i64, HashSet<Tid>>> {
+        let mut maybe_init = HashMap::new();
+
+        if let Ok((lower_bound, upper_bound)) = interval.try_to_offset_interval().as_mut() {
+            if ignore_non_neg_offsets {
+                if *lower_bound > 0 {
+                    *lower_bound = 0;
+                }
+                if *upper_bound > 0 {
+                    *upper_bound = 0;
+                }
+            }
+            for i in *lower_bound..=*upper_bound {
+                if let InitializationStatus::MaybeInit { addresses } =
+                    self.get_init_status_at_byte_index(i)
+                {
+                    maybe_init.insert(i, addresses);
+                }
+            }
+        } else {
+            println!("could not get offset interval.")
+        }
+        if maybe_init.is_empty() {
+            return None;
+        }
+        Some(maybe_init)
     }
 
     /// Inserts an `InitalizationStatus` at multiple offsets, utilizing the `merge()` function.
