@@ -1,6 +1,6 @@
 use super::init_status::InitializationStatus;
 use crate::{
-    abstract_domain::{AbstractDomain, AbstractIdentifier, MemRegion},
+    abstract_domain::{AbstractIdentifier, MemRegion},
     intermediate_representation::ByteSize,
 };
 use std::collections::HashMap;

@@ -3,7 +3,7 @@ mod context;
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    abstract_domain::AbstractIdentifier,
+    abstract_domain::{AbstractIdentifier, TryToInterval},
     analysis::{
         self,
         fixpoint::Computation,
@@ -276,7 +276,7 @@ fn find_uninit_access_in_blk<'a>(
                                 if let Some(maybe_init) = mem_region
                                     .get_maybe_init_locatons_within_interval(
                                         data_domain.get_relative_values().get(source_id).unwrap(),
-                                        false,
+                                        true,
                                     )
                                 {
                                     cwe_warnings.push(generate_cwe_warning_for_maybe_uninit_access(
@@ -292,26 +292,30 @@ fn find_uninit_access_in_blk<'a>(
             }
             Def::Store { .. } => {
                 if let Some(data_domain) = pir.eval_address_at_def(&def.tid) {
-                    for target_id in data_domain.get_relative_values().keys() {
-                        if let Some(mem_region) = value.tracked_objects.get_mut(target_id) {
-                            // mem_region contains uninit within the interval of interest. Change it!
-                            if mem_region.contains_uninit_within_interval(
-                                data_domain.get_relative_values().get(target_id).unwrap(),
-                                false,
-                            ) {
-                                mem_region.merge_interval(
-                                    &InitializationStatus::Init {
-                                        addresses: [def.tid.clone()].into(),
-                                    },
-                                    data_domain.get_relative_values().get(target_id).unwrap(),
-                                );
+                    for (id, interval) in data_domain.get_relative_values().iter() {
+                        if value.tracked_objects.contains_key(id) {
+                            if let Ok((offset_start, offset_end)) =
+                                interval.try_to_offset_interval()
+                            {
+                                for offset in offset_start..=offset_end {
+                                    value.merge_precise_single_offset(
+                                        id,
+                                        offset,
+                                        &InitializationStatus::Init {
+                                            addresses: [def.tid.clone()].into(),
+                                        },
+                                    );
+                                }
+                            } else {
+                                println!("interval was top");
                             }
                         } else {
-                            println!("Store to {target_id} here @ {}, but object is not tracked (possible UAF) :( TODO: Add object?", def.tid);
+                            println!("Store to {id} here @ {}, but object is not tracked (possible UAF) :( TODO: Add object?", def.tid);
                         }
                     }
                 }
             }
+
             _ => (),
         }
     }
@@ -325,6 +329,7 @@ fn extract_results<'a>(
     let graph = computation.get_graph();
     for node in graph.node_indices() {
         if let Node::BlkStart(_, _) | Node::BlkEnd(_, _) = graph[node] {
+            // BlkEnd wirklich nötig hier?
             if let Some(node_value) = computation.get_node_value(node) {
                 //println!("\n{}", graph[node]);
                 cwe_warnings.append(

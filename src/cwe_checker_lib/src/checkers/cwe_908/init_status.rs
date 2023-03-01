@@ -15,7 +15,9 @@ pub enum InitializationStatus {
 }
 
 impl InitializationStatus {
-    /// merge for in-block statuses (Init + Uninit = Init)
+    /// Merge for inter block tracking
+    ///
+    /// Any `InitializationStatus` merged with `Init` results in `Init`.
     pub fn merge_precise(&self, other: &Self) -> Self {
         match (self, other) {
             (InitializationStatus::Init { addresses }, InitializationStatus::Uninit)
@@ -24,13 +26,27 @@ impl InitializationStatus {
                     addresses: addresses.clone(),
                 }
             }
-            (a, b) => a.merge(b),
+            (
+                InitializationStatus::Init { addresses },
+                InitializationStatus::MaybeInit { addresses: a },
+            )
+            | (
+                InitializationStatus::MaybeInit { addresses },
+                InitializationStatus::Init { addresses: a },
+            ) => InitializationStatus::Init {
+                addresses: addresses.union(a).cloned().collect(),
+            },
+            _ => self.merge(other),
         }
     }
 }
 
 impl AbstractDomain for InitializationStatus {
-    /// merges in the sense for merging blocks (Init + Uninit = MaybeInint)
+    /// Merge for intra block tracking
+    ///
+    /// Same `InitializationStatus` are kept.
+    /// Introduces `MaybeInit` if `Init` and `Uninit` are merged.
+    /// Keeps `MaybeInit` if any parameter is `MaybeInit`.
     fn merge(&self, other: &Self) -> Self {
         match (self, other) {
             (
