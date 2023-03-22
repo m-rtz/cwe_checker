@@ -1,6 +1,10 @@
 use std::collections::BTreeMap;
 
-use super::{state::State, InitializationStatus};
+use super::{
+    eval_extern_calls::{eval_free, eval_memcpy},
+    state::State,
+    InitializationStatus,
+};
 use crate::{
     abstract_domain::{AbstractDomain, DataDomain, TryToInterval},
     analysis::{
@@ -9,6 +13,7 @@ use crate::{
         pointer_inference::{PointerInference, ValueDomain},
         vsa_results::VsaResult,
     },
+    checkers::cwe_908::eval_extern_calls::eval_memset,
     intermediate_representation::*,
     prelude::AnalysisResults,
 };
@@ -57,8 +62,9 @@ impl<'a> Context<'a> {
         memset_symbol: &ExternSymbol,
         value: &State,
     ) -> Option<State> {
-        println!("handeling memset");
+        //println!("handeling memset");
         let params = self.extract_parameters(memset_symbol, call_tid);
+        eval_memset(call_tid, params.clone());
         if let Some(target) = &params[0] {
             //TODO: Check if param[1] is not uninit
             if let Some(size) = &params[2] {
@@ -68,7 +74,7 @@ impl<'a> Context<'a> {
                         let target_offset = match target_interval.try_to_offset_interval() {
                             Ok(target_offset_interval) => target_offset_interval.0, //over approx here
                             Err(_) => {
-                                println!("memset: offset interval was top. TODO: using 0 here?");
+                                //println!("memset: offset interval was top. TODO: using 0 here?");
                                 0
                             }
                         };
@@ -91,17 +97,17 @@ impl<'a> Context<'a> {
                                 }
                             }
                         }
-                        println!("We have no info about size paramter of memset :(\n TODO! Gonna do nothing for now...");
+                        //println!("We have no info about size paramter of memset :(\n TODO! Gonna do nothing for now...");
                         return Some(value.clone());
                     } else {
-                        println!("We are not tracking this mem object :(")
+                        //println!("We are not tracking this mem object :(")
                     }
                 }
             } else {
-                println!("could not get parm[2]");
+                //println!("could not get parm[2]");
             }
         } else {
-            println!("could not get parm[0]");
+            //println!("could not get parm[0]");
         }
 
         None
@@ -115,10 +121,11 @@ impl<'a> Context<'a> {
         value: &State,
     ) -> Option<State> {
         let params = self.extract_parameters(memcpy_symbol, call_tid);
+        eval_memcpy(call_tid, params.clone());
         if let Some(parm0) = &params[0] {
             for (target_id, target_interval) in parm0.get_relative_values() {
                 if let Some(target) = value.tracked_objects.get(target_id) {
-                    let target_offset = target_interval.try_to_offset_interval().unwrap().0; // Over approx here
+                    let target_offset = target_interval.try_to_offset_interval().unwrap().0; // Over approx here + oft panic
 
                     if let Some(parm1) = &params[1] {
                         for (source_id, source_interval) in parm1.get_relative_values() {
@@ -141,7 +148,7 @@ impl<'a> Context<'a> {
                                         let status =
                                             source.get_init_status_at_byte_index(absolute_offset);
                                         if status == InitializationStatus::Uninit {
-                                            println!("Source contains uninit within rellevant interval. TODO: Possible uninit read!")
+                                            //println!("Source contains uninit within rellevant interval. TODO: Possible uninit read!")
                                         }
                                         target.insert_at_byte_index(
                                             status,
@@ -152,19 +159,19 @@ impl<'a> Context<'a> {
                                     value.tracked_objects.insert(target_id.clone(), target);
                                     return Some(value);
                                 } else {
-                                    println!("parm[2] was none :(")
+                                    //println!("parm[2] was none :(")
                                 }
                             } else {
-                                println!("We are not tracking source object. TODO: let's consider it uninit")
+                                //println!("We are not tracking source object. TODO: let's consider it uninit")
                             }
                         }
                     } else {
-                        println!("parm[1] was none :(")
+                        //println!("parm[1] was none :(")
                     }
                 }
             }
         } else {
-            println!("parm[0] was None :(")
+            //println!("parm[0] was None :(")
         }
 
         None
@@ -177,18 +184,19 @@ impl<'a> Context<'a> {
         free_symbol: &ExternSymbol,
         value: &State,
     ) -> Option<State> {
-        println!("in handle_free");
+        //println!("in handle_free");
         let params = self.extract_parameters(free_symbol, call_tid);
+        eval_free(call_tid, params.clone());
         if let Some(arg) = &params[0] {
             // TODO: do we want to remove all potential objects?
             for (id, _interval) in arg.get_relative_values() {
                 if let Some(a) = value.tracked_objects.get(id) {
-                    println!("remove freed memory object");
+                    //println!("remove freed memory object");
                     let mut value = value.clone();
                     value.tracked_objects.remove(id);
                     return Some(value);
                 } else {
-                    println!("We do not track the freed object.")
+                    //println!("We do not track the freed object.")
                 }
             }
         }
@@ -251,7 +259,7 @@ impl<'a> crate::analysis::forward_interprocedural_fixpoint::Context<'a> for Cont
 
                             return Some(updated);
                         } else {
-                            println!("interval was top");
+                            //println!("interval was top");
                         }
                     }
                 }
@@ -313,7 +321,7 @@ impl<'a> crate::analysis::forward_interprocedural_fixpoint::Context<'a> for Cont
                 .get(target),
             _ => None,
         } {
-            println!("{:?}: {}", call.tid, extern_symbol.name);
+            //println!("{:?}: {}", call.tid, extern_symbol.name);
             match extern_symbol.name.as_str() {
                 "memset" => return self.handle_memset(&call.tid, extern_symbol, value),
                 "memcpy" => return self.handle_memcpy(&call.tid, extern_symbol, value),
@@ -326,17 +334,17 @@ impl<'a> crate::analysis::forward_interprocedural_fixpoint::Context<'a> for Cont
                             {
                                 for (id, _interval) in data_domain.get_relative_values() {
                                     if value.tracked_objects.contains_key(id) {
-                                        println!("tracked object: {id} with uninit values within interval was used as param by {}! TODO: issue warning here!", extern_symbol.name)
+                                        //println!("tracked object: {id} with uninit values within interval was used as param by {}! TODO: issue warning here!", extern_symbol.name)
                                     }
-                                    println!(
-                                        "Argument is mem object we do not track :( TODO: handle it"
-                                    )
+                                    //println!(
+                                    //    "Argument is mem object we do not track :( TODO: handle it"
+                                    //)
                                 }
                             }
-                            println!("Could not get argument of call :(")
+                            //println!("Could not get argument of call :(")
                         }
                     } else {
-                        println!("extern sym: {} is white listed", extern_symbol.name);
+                        //println!("extern sym: {} is white listed", extern_symbol.name);
                     }
                 }
             }

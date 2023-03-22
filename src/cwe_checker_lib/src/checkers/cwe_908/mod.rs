@@ -17,7 +17,9 @@ use crate::{
 use petgraph::graph::NodeIndex;
 use serde::{Deserialize, Serialize};
 
-use self::{context::Context, init_status::InitializationStatus, state::State};
+use self::{
+    context::Context, eval_extern_calls::*, init_status::InitializationStatus, state::State,
+};
 use crate::{
     analysis::graph::*,
     utils::{
@@ -27,6 +29,7 @@ use crate::{
     AnalysisResults, CweModule,
 };
 
+mod eval_extern_calls;
 mod init_status;
 mod state;
 
@@ -97,7 +100,7 @@ fn init_heap_allocation<'a>(
     for (call, node) in alloc_calls {
         if let Some(fp_node_value) = pir.get_node_value(*node) {
             if let Some(id) = get_abstract_identifier(call, fp_node_value.unwrap_value()) {
-                println!("heap init id: {}", &id);
+                //println!("heap init id: {}", &id);
 
                 let mut state = State::new_with_id(id, address_bytesize);
 
@@ -285,7 +288,7 @@ fn find_uninit_access_in_blk<'a>(
                                 }
                             }
                         } else {
-                            println!("Load from {source_id} here @ {}, but its not tracked (possible UAF):(. TODO: Consider it as uninit?", def.tid)
+                            //println!("Load from {source_id} here @ {}, but its not tracked (possible UAF):(. TODO: Consider it as uninit?", def.tid)
                         }
                     }
                 }
@@ -307,10 +310,10 @@ fn find_uninit_access_in_blk<'a>(
                                     );
                                 }
                             } else {
-                                println!("interval was top");
+                                //println!("interval was top");
                             }
                         } else {
-                            println!("Store to {id} here @ {}, but object is not tracked (possible UAF) :( TODO: Add object?", def.tid);
+                            //println!("Store to {id} here @ {}, but object is not tracked (possible UAF) :( TODO: Add object?", def.tid);
                         }
                     }
                 }
@@ -358,26 +361,26 @@ pub fn check_cwe(
     let allocation_target_nodes =
         get_allocation_return_sites(config.allocation_symbols, pir.get_graph(), analysis_results);
 
-    print_graph(pir.get_graph());
+    //print_graph(pir.get_graph());
 
     let computation = create_computation(context, None);
     let computation = init_stack_allocation(computation, pointer_size, pir);
     let mut computation =
         init_heap_allocation(computation, &allocation_target_nodes, pointer_size, pir);
-    println!(
-        "\n#################################\n START COMPUTING FIXPOINT\n#################################"
-    );
+    //println!(
+    //    "\n#################################\n START COMPUTING FIXPOINT\n#################################"
+    //);
     computation.compute_with_max_steps(100);
-    println!(
-        "\n#################################\n END COMPUTING FIXPOINT\n#################################"
-    );
+    //println!(
+    //    "\n#################################\n END COMPUTING FIXPOINT\n#################################"
+    //);
 
     if !computation.has_stabilized() {
         panic!("Fixpoint for expression propagation did not stabilize.");
     }
 
     let mut cwe_warnings = extract_results(computation);
-    println!("\n###########\nFinal Results\n#########");
+    //println!("\n###########\nFinal Results\n#########");
     cwe_warnings.dedup();
 
     (vec![], cwe_warnings)

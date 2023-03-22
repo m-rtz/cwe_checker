@@ -151,7 +151,7 @@ impl MemRegion<InitializationStatus> {
             }
             false
         } else {
-            println!("could not determine offset interval, so consider it uninit!");
+            //println!("could not determine offset interval, so consider it uninit!");
             true
         }
     }
@@ -180,7 +180,7 @@ impl MemRegion<InitializationStatus> {
                 }
             }
         } else {
-            println!("could not get offset interval.")
+            //println!("could not get offset interval.")
         }
         if maybe_init.is_empty() {
             return None;
@@ -199,9 +199,9 @@ impl MemRegion<InitializationStatus> {
                 }
             }
         } else {
-            println!(
-                "provided interval can not be turned into offset interval... find a solution here!"
-            )
+            //println!(
+            //    "provided interval can not be turned into offset interval... find a solution here!"
+            //)
         }
     }
 
