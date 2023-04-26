@@ -23,6 +23,12 @@ impl State {
             .insert(id, MemRegion::new(address_bytesize));
         state
     }
+    // Adds new entry with empty MemRegion, if the entry does not exists.
+    pub fn add_new_object(&mut self, id: AbstractIdentifier, address_bytesize: ByteSize) {
+        self.tracked_objects
+            .entry(id)
+            .or_insert_with(|| MemRegion::new(address_bytesize));
+    }
     /// Inserts `status` at specific offset in a **tracked** memory object.
     pub fn insert_single_offset(
         &mut self,
@@ -64,24 +70,53 @@ impl State {
     pub fn get_intersecting_objects<'a>(
         &'a self,
         other: &'a State,
-    ) -> Option<
-        Vec<(
-            &AbstractIdentifier,
-            (
-                &MemRegion<InitializationStatus>,
-                &MemRegion<InitializationStatus>,
-            ),
-        )>,
-    > {
+    ) -> Vec<(
+        &AbstractIdentifier,
+        (
+            &MemRegion<InitializationStatus>,
+            &MemRegion<InitializationStatus>,
+        ),
+    )> {
         let mut intersection = vec![];
         for (id, self_mem_region) in self.tracked_objects.iter() {
             if let Some(other_mem_region) = other.tracked_objects.get(id) {
                 intersection.push((id, (self_mem_region, other_mem_region)))
             }
         }
-        if intersection.is_empty() {
-            return None;
+
+        intersection
+    }
+    /// Copies a range of offsets from a tracked source object to a tracked target object.
+    ///
+    /// Return `Err` if the provided objects are not contained in `tracked_objects`.
+    pub fn copy_range_from_other_object(
+        &mut self,
+        source: &AbstractIdentifier,
+        source_offset: i64,
+        target: &AbstractIdentifier,
+        target_offset: i64,
+        size: u64,
+    ) -> Result<(), String> {
+        let source_mem_region = self
+            .tracked_objects
+            .get(source)
+            .ok_or("Source identifier is not tracked.")?
+            .clone();
+        if !self.tracked_objects.contains_key(target) {
+            return Err("Source identifier is not tracked.".into());
         }
-        Some(intersection)
+        for i in 0..=size as i64 {
+            let status = source_mem_region.get_init_status_at_byte_index(source_offset + i);
+            self.insert_single_offset(target, target_offset + i, status);
+        }
+
+        Ok(())
+    }
+
+    pub fn object_is_uninitialized(&self, id: &AbstractIdentifier) -> bool {
+        if let Some(mem_region) = self.tracked_objects.get(id) {
+            return mem_region.entry_map().is_empty();
+        }
+        false
     }
 }

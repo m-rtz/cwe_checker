@@ -14,6 +14,7 @@ pub mod cwe_332;
 pub mod cwe_367;
 pub mod cwe_416;
 pub mod cwe_426;
+pub mod cwe_457;
 pub mod cwe_467;
 pub mod cwe_476;
 pub mod cwe_560;
@@ -21,4 +22,4 @@ pub mod cwe_676;
 pub mod cwe_78;
 pub mod cwe_782;
 pub mod cwe_789;
-pub mod cwe_908;
+

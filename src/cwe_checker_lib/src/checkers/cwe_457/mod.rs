@@ -1,7 +1,5 @@
 mod context;
-
-use std::collections::{HashMap, HashSet};
-
+use self::{context::Context, init_status::InitializationStatus, state::State};
 use crate::{
     abstract_domain::{AbstractIdentifier, TryToInterval},
     analysis::{
@@ -14,12 +12,6 @@ use crate::{
     },
     intermediate_representation::*,
 };
-use petgraph::graph::NodeIndex;
-use serde::{Deserialize, Serialize};
-
-use self::{
-    context::Context, eval_extern_calls::*, init_status::InitializationStatus, state::State,
-};
 use crate::{
     analysis::graph::*,
     utils::{
@@ -28,20 +20,23 @@ use crate::{
     },
     AnalysisResults, CweModule,
 };
-
-mod eval_extern_calls;
+use analysis::interprocedural_fixpoint_generic::NodeValue::Value;
+use petgraph::graph::NodeIndex;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 mod init_status;
 mod state;
 
 /// The module name and version
 pub static CWE_MODULE: CweModule = CweModule {
-    name: "CWE908",
+    name: "CWE457",
     version: "0.1",
     run: check_cwe,
 };
 
 /// The configuration struct.
 /// Lists all extern symbols in consideration, which create a memory object.
+/// Lists all extern symbols, which should be ignored by this analysis.
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Hash, Clone)]
 pub struct Config {
     allocation_symbols: Vec<String>,
@@ -49,7 +44,6 @@ pub struct Config {
 }
 
 /// For the provided symbols return the corresponding `Tid` of and `NodeIndex` of the return site.
-// TODO: iterating over graph can be combined with heap initialization!
 fn get_allocation_return_sites(
     symbols: Vec<String>,
     graph: &Graph,
@@ -61,9 +55,7 @@ fn get_allocation_return_sites(
             symbol_tids.push(tid);
         }
     }
-
     let mut return_nodes = vec![];
-
     for edge in graph.edge_indices() {
         if let Edge::ExternCallStub(jmp) = graph[edge] {
             if let Jmp::Call { target, .. } = &jmp.term {
@@ -79,18 +71,16 @@ fn get_allocation_return_sites(
 /// Resolves Tid of allocation function and the state of the return site to the
 /// AbstractIdentifier of the new mem object.
 fn get_abstract_identifier(tid: &Tid, state: &PiState) -> Option<AbstractIdentifier> {
-    for id in state.memory.get_all_object_ids() {
-        if id.get_tid().address == tid.address {
-            return Some(id);
-        }
-    }
-    None
+    state
+        .memory
+        .get_all_object_ids()
+        .into_iter()
+        .find(|id| id.get_tid().address == tid.address)
 }
 
-/// Creates or updates a node's Value by adding a heap object.
+/// Creates or updates a node's state by adding a heap object.
 ///
-/// The nodes after allocation calls are extended by the newly created heap object and an uninitialized `MemRegion`.
-/// Already assigned identifier-MemRegion pairs are kept.
+/// The state of nodes after allocation calls are extended by the newly created heap object and an uninitialized `MemRegion`.
 fn init_heap_allocation<'a>(
     mut computation: Computation<GeneralizedContext<'a, Context<'a>>>,
     alloc_calls: &Vec<(Tid, NodeIndex)>,
@@ -100,32 +90,24 @@ fn init_heap_allocation<'a>(
     for (call, node) in alloc_calls {
         if let Some(fp_node_value) = pir.get_node_value(*node) {
             if let Some(id) = get_abstract_identifier(call, fp_node_value.unwrap_value()) {
-                //println!("heap init id: {}", &id);
-
-                let mut state = State::new_with_id(id, address_bytesize);
+                let mut state = State::new_with_id(id.clone(), address_bytesize);
 
                 if let Some(node_value) = computation.get_node_value(*node) {
                     state
                         .tracked_objects
                         .extend(node_value.unwrap_value().tracked_objects.clone());
                 }
-                computation.set_node_value(
-                    *node,
-                    analysis::interprocedural_fixpoint_generic::NodeValue::Value(state),
-                );
-
-                computation.get_node_value(*node).unwrap().unwrap_value();
+                computation.set_node_value(*node, Value(state));
+                println!("added {} for call @ {call}", &id.get_tid());
             }
         }
     }
     computation
 }
 
-/// Creates or updated the Value for every function's first block.
+/// Creates or updated every function's first node's state by adding the stackframe.
 ///
-/// The new Value is associated to the first BlkStart-node of a function and adds the stack frame.
 /// Note that, the offset `0` is set as `InitializationStatus::Init` and represents the return address.
-/// Already assigned identifier-MemRegion pairs are kept.
 fn init_stack_allocation<'a>(
     mut computation: Computation<GeneralizedContext<'a, Context<'a>>>,
     address_bytesize: ByteSize,
@@ -159,10 +141,7 @@ fn init_stack_allocation<'a>(
                             .tracked_objects
                             .extend(node_value.unwrap_value().tracked_objects.clone());
                     }
-                    computation.set_node_value(
-                        node,
-                        analysis::interprocedural_fixpoint_generic::NodeValue::Value(state),
-                    );
+                    computation.set_node_value(node, Value(state));
                 }
             }
         }
@@ -173,18 +152,20 @@ fn init_stack_allocation<'a>(
 /// Generate the CWE warning for a detected instance of the CWE.
 fn generate_cwe_warning_for_uninit_access_(
     location: &Tid,
+    sub: &Sub,
     is_stack_allocation: bool,
 ) -> CweWarning {
     CweWarning::new(
         CWE_MODULE.name,
         CWE_MODULE.version,
         format!(
-            "Access of uninitialized {} variable at 0x{}",
+            "Access of uninitialized {} variable at 0x{} ({})",
             match is_stack_allocation {
                 true => "stack",
                 false => "heap",
             },
-            location.address
+            location.address,
+            sub.name
         ),
     )
     .tids(vec![format!("{}", location)])
@@ -192,18 +173,21 @@ fn generate_cwe_warning_for_uninit_access_(
     .symbols(vec![])
 }
 
+/// Generate a more verbose CWE warning for a detected instance of the CWE.
 fn generate_cwe_warning_for_maybe_uninit_access(
     location: &Tid,
+    sub: &Sub,
     is_stack_allocation: bool,
     maybe_uninit_locations: HashMap<i64, HashSet<Tid>>,
 ) -> CweWarning {
     let mut description = format!(
-        "Access of potentially uninitialized {} variable at 0x{}.\n",
+        "Access of potentially uninitialized {} variable at 0x{} ({}).\n",
         match is_stack_allocation {
             true => "stack",
             false => "heap",
         },
         location.address,
+        sub.name
     );
     description.push_str("Offset\tPotential initialization location\n");
     for (offset, init_locations) in maybe_uninit_locations {
@@ -225,9 +209,33 @@ fn generate_cwe_warning_for_maybe_uninit_access(
         .symbols(vec![])
 }
 
+// Generates a waring according to a call with uninitialized parameter
+fn generate_cwe_warning_for_uninit_parameter(
+    location: &Tid,
+    callee: &Sub,
+    object_id: &AbstractIdentifier,
+) -> CweWarning {
+    CweWarning::new(
+        CWE_MODULE.name,
+        CWE_MODULE.version,
+        format!(
+            "Uninitialized memory object {} is passed to {} at {}",
+            object_id, callee.name, location.address
+        ),
+    )
+    .tids(vec![format!("{}", location)])
+    .addresses(vec![location.address.clone()])
+    .symbols(vec![callee.name.clone()])
+}
+
+/// Returns a CWE warning if the block contains a `Def:Load` of an uninitialized offset.
+///
+/// This function supports intra block initialization, thus `Def::Store` to uninitialized
+/// offsets changes the state. The state is not assigned to the node afterwards.
 fn find_uninit_access_in_blk<'a>(
     computation: &Computation<GeneralizedContext<'a, Context<'a>>>,
     value: &State,
+    sub: &Sub,
     blk: &Blk,
 ) -> Vec<CweWarning> {
     let pir = computation.get_context().get_context().pir;
@@ -241,54 +249,37 @@ fn find_uninit_access_in_blk<'a>(
                 if let Some(data_domain) = pir.eval_address_at_def(&def.tid) {
                     for source_id in data_domain.get_relative_values().keys() {
                         if let Some(mem_region) = value.tracked_objects.get(source_id) {
+                            let interval =
+                                data_domain.get_relative_values().get(source_id).unwrap();
                             if source_id.to_string().contains("instr") {
                                 // it is a heap object
-                                if mem_region.contains_uninit_within_interval(
-                                    data_domain.get_relative_values().get(source_id).unwrap(),
-                                    false,
-                                ) {
+                                if mem_region.contains_uninit_within_interval(interval, false) {
                                     cwe_warnings.push(generate_cwe_warning_for_uninit_access_(
-                                        &def.tid, false,
+                                        &def.tid, sub, false,
                                     ))
                                 }
                                 if let Some(maybe_init) = mem_region
-                                    .get_maybe_init_locatons_within_interval(
-                                        data_domain.get_relative_values().get(source_id).unwrap(),
-                                        false,
-                                    )
+                                    .get_maybe_init_locatons_within_interval(interval, false)
                                 {
                                     cwe_warnings.push(generate_cwe_warning_for_maybe_uninit_access(
-                                        &def.tid, false, maybe_init,
+                                        &def.tid, sub, false, maybe_init,
                                     ))
                                 }
                             } else {
-                                //println!("\t\t{}", id);
-
-                                //println!("\t\t{:?}", mem_region);
-                                //println!(                                    "\t\t{}",                                    data_domain.get_relative_values().get(id).unwrap()                                );
-
                                 // it is a stack frame
-                                if mem_region.contains_uninit_within_interval(
-                                    data_domain.get_relative_values().get(source_id).unwrap(),
-                                    true,
-                                ) {
+                                if mem_region.contains_uninit_within_interval(interval, true) {
                                     cwe_warnings.push(generate_cwe_warning_for_uninit_access_(
-                                        &def.tid, true,
+                                        &def.tid, sub, true,
                                     ))
                                 }
                                 if let Some(maybe_init) = mem_region
-                                    .get_maybe_init_locatons_within_interval(
-                                        data_domain.get_relative_values().get(source_id).unwrap(),
-                                        true,
-                                    )
+                                    .get_maybe_init_locatons_within_interval(interval, true)
                                 {
                                     cwe_warnings.push(generate_cwe_warning_for_maybe_uninit_access(
-                                        &def.tid, true, maybe_init,
+                                        &def.tid, sub, true, maybe_init,
                                     ))
                                 }
                             }
-                        } else {
-                            //println!("Load from {source_id} here @ {}, but its not tracked (possible UAF):(. TODO: Consider it as uninit?", def.tid)
                         }
                     }
                 }
@@ -309,11 +300,7 @@ fn find_uninit_access_in_blk<'a>(
                                         },
                                     );
                                 }
-                            } else {
-                                //println!("interval was top");
                             }
-                        } else {
-                            //println!("Store to {id} here @ {}, but object is not tracked (possible UAF) :( TODO: Add object?", def.tid);
                         }
                     }
                 }
@@ -322,16 +309,42 @@ fn find_uninit_access_in_blk<'a>(
             _ => (),
         }
     }
+    cwe_warnings.dedup();
     cwe_warnings
 }
 
+/// Checks if any parameter referes to an entirely uninitalized memory object and retruns a warning if true.
+fn is_call_with_uninit_parameter(
+    arguments: &Vec<Arg>,
+    call_tid: &Tid,
+    pir: &PointerInference,
+    state: &State,
+    callee: &Sub,
+) -> Option<CweWarning> {
+    for arg in arguments {
+        if let Some(parameter) = pir.eval_parameter_arg_at_call(call_tid, arg) {
+            for id in parameter.get_relative_values().keys() {
+                if state.object_is_uninitialized(id) {
+                    return Some(generate_cwe_warning_for_uninit_parameter(
+                        call_tid, callee, id,
+                    ));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Iterate the graph and sweeps for uninitialized access within blocks.
 fn extract_results<'a>(
     computation: Computation<GeneralizedContext<'a, Context<'a>>>,
+    extern_symbols_whitelist: Vec<String>,
 ) -> Vec<CweWarning> {
     let mut cwe_warnings = Vec::new();
     let graph = computation.get_graph();
+    let pir = computation.get_context().get_context().pir;
     for node in graph.node_indices() {
-        if let Node::BlkStart(_, _) | Node::BlkEnd(_, _) = graph[node] {
+        if let Node::BlkStart(_, _) = graph[node] {
             // BlkEnd wirklich nötig hier?
             if let Some(node_value) = computation.get_node_value(node) {
                 //println!("\n{}", graph[node]);
@@ -339,10 +352,61 @@ fn extract_results<'a>(
                     find_uninit_access_in_blk(
                         &computation,
                         node_value.unwrap_value(),
+                        &graph[node].get_sub().term,
                         &computation.get_graph()[node].get_block().term,
                     )
                     .as_mut(),
                 );
+            }
+        }
+    }
+
+    for edge in graph.edge_indices() {
+        // Iterating external calls, that are not white listed
+        if let Edge::ExternCallStub(call) = graph[edge] {
+            if let Jmp::Call { target, return_: _ } = &call.term {
+                if let Some(ext_sym) = pir.get_context().extern_symbol_map.get(target) {
+                    if !extern_symbols_whitelist.contains(&ext_sym.name) {
+                        let node_index = graph.edge_endpoints(edge).unwrap().0;
+                        let state = computation
+                            .get_node_value(node_index)
+                            .unwrap()
+                            .unwrap_value();
+                        let callee = graph[node_index].get_sub();
+
+                        if let Some(warning) = is_call_with_uninit_parameter(
+                            &ext_sym.parameters,
+                            target,
+                            pir,
+                            state,
+                            &callee.term,
+                        ) {
+                            cwe_warnings.push(warning);
+                        }
+                    }
+                }
+            }
+        }
+        // Iterating internal calls
+        if let Edge::Call(call) = graph[edge] {
+            if let Jmp::Call { target, return_: _ } = &call.term {
+                let func_sig = computation.get_context().get_context().function_signatures;
+                if let Some(signature) = func_sig.get(target) {
+                    let arguments = &signature.parameters.keys().cloned().collect();
+                    let node_index = graph.edge_endpoints(edge).unwrap().0;
+                    let state = computation
+                        .get_node_value(node_index)
+                        .unwrap()
+                        .unwrap_value();
+                    if let Node::CallSource { source: _, target } = graph[node_index] {
+                        let callee = &target.1.term;
+                        if let Some(warning) =
+                            is_call_with_uninit_parameter(arguments, &call.tid, pir, state, callee)
+                        {
+                            cwe_warnings.push(warning);
+                        }
+                    }
+                }
             }
         }
     }
@@ -367,19 +431,19 @@ pub fn check_cwe(
     let computation = init_stack_allocation(computation, pointer_size, pir);
     let mut computation =
         init_heap_allocation(computation, &allocation_target_nodes, pointer_size, pir);
-    //println!(
-    //    "\n#################################\n START COMPUTING FIXPOINT\n#################################"
-    //);
+    println!(
+       "\n#################################\n START COMPUTING FIXPOINT\n#################################"
+    );
     computation.compute_with_max_steps(100);
-    //println!(
-    //    "\n#################################\n END COMPUTING FIXPOINT\n#################################"
-    //);
+    println!(
+       "\n#################################\n END COMPUTING FIXPOINT\n#################################"
+    );
 
     if !computation.has_stabilized() {
-        panic!("Fixpoint for expression propagation did not stabilize.");
+        panic!("Fixpoint for CWE 908 did not stabilize.");
     }
 
-    let mut cwe_warnings = extract_results(computation);
+    let mut cwe_warnings = extract_results(computation, config.extern_symbol_whitelist);
     //println!("\n###########\nFinal Results\n#########");
     cwe_warnings.dedup();
 
@@ -388,7 +452,7 @@ pub fn check_cwe(
 
 fn print_graph(graph: &Graph) {
     for node in graph.node_indices() {
-        if let Node::BlkStart(blk, sub) = graph[node] {
+        if let Node::BlkStart(blk, _sub) = graph[node] {
             println!("blk: {} @ {}", blk.tid, blk.tid.address);
             for def in &blk.term.defs {
                 println!("\t{}: {}", def.tid, def.term)

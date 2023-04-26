@@ -101,7 +101,12 @@
     ]
   },
   "CWE457": {
-    "symbols": []
+    "allocation_symbols": [
+      "malloc"
+    ],
+    "extern_symbol_whitelist": [
+      "memfrob"
+    ]
   },
   "CWE467": {
     "_comment": "any function that takes something of type size_t could be a possible candidate.",
@@ -222,14 +227,6 @@
       "malloc",
       "realloc",
       "calloc"
-    ]
-  },
-  "CWE908": {
-    "allocation_symbols": [
-      "malloc"
-    ],
-    "extern_symbol_whitelist": [
-      "memfrob"
     ]
   },
   "check_path": {

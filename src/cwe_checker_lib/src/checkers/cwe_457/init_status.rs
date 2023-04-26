@@ -5,7 +5,6 @@ use crate::{
     abstract_domain::{AbstractDomain, HasTop, IntervalDomain, MemRegion, SizedDomain},
     intermediate_representation::{ByteSize, Tid},
 };
-use itertools::Itertools;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum InitializationStatus {
@@ -109,12 +108,6 @@ impl HasTop for InitializationStatus {
 }
 
 impl MemRegion<InitializationStatus> {
-    pub fn contains_uninit(&self) -> bool {
-        self.entry_map()
-            .values()
-            .contains(&InitializationStatus::Uninit)
-    }
-
     /// Returns the `InitalizationStatus` at the given offset.
     ///
     /// If no value at the offset is present `InitalizationStatus::Uninit` is returned.
