@@ -157,20 +157,25 @@ impl MemRegion<InitializationStatus> {
         let mut maybe_init = HashMap::new();
 
         if let Ok((lower_bound, upper_bound)) = interval.try_to_offset_interval().as_mut() {
-            if ignore_non_neg_offsets {
-                if *lower_bound > 0 {
-                    *lower_bound = 0;
+            if upper_bound.clone() - lower_bound.clone() < 256 {
+                if ignore_non_neg_offsets {
+                    if *lower_bound > 0 {
+                        *lower_bound = 0;
+                    }
+                    if *upper_bound > 0 {
+                        *upper_bound = 0;
+                    }
                 }
-                if *upper_bound > 0 {
-                    *upper_bound = 0;
+                for i in *lower_bound..=*upper_bound {
+                    if let InitializationStatus::MaybeInit { addresses } =
+                        self.get_init_status_at_byte_index(i)
+                    {
+                        maybe_init.insert(i, addresses);
+                    }
                 }
-            }
-            for i in *lower_bound..=*upper_bound {
-                if let InitializationStatus::MaybeInit { addresses } =
-                    self.get_init_status_at_byte_index(i)
-                {
-                    maybe_init.insert(i, addresses);
-                }
+            } else {
+                println!("fat interval in get_maybe_init_locatons_within_interval! returnin None");
+                return None;
             }
         } else {
             //println!("could not get offset interval.")

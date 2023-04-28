@@ -209,18 +209,20 @@ impl<'a> crate::analysis::forward_interprocedural_fixpoint::Context<'a> for Cont
                         //println!("we do track: {} and interval is top: {}", id, interval.is_top());
                         if let Ok((offset_start, offset_end)) = interval.try_to_offset_interval() {
                             let mut updated = value.clone();
-                            //println!("interval: [{}:{}]", offset_start, offset_end);
-
-                            for offset in offset_start..=offset_end {
-                                updated.merge_precise_single_offset(
-                                    id,
-                                    offset,
-                                    &InitializationStatus::Init {
-                                        addresses: [def.tid.clone()].into(),
-                                    },
-                                );
+                            if offset_end - offset_start < 256 {
+                                for offset in offset_start..=offset_end {
+                                    updated.merge_precise_single_offset(
+                                        id,
+                                        offset,
+                                        &InitializationStatus::Init {
+                                            addresses: [def.tid.clone()].into(),
+                                        },
+                                    );
+                                }
+                                return Some(updated);
+                            } else {
+                                println!("interval: [{}:{}] is too large (interval_bytesize?: {})! skipping this Store {}...", offset_start, offset_end, interval.bytesize(), def.term);
                             }
-                            return Some(updated);
                         }
                     }
                 }

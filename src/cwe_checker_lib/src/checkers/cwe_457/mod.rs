@@ -291,14 +291,18 @@ fn find_uninit_access_in_blk<'a>(
                             if let Ok((offset_start, offset_end)) =
                                 interval.try_to_offset_interval()
                             {
-                                for offset in offset_start..=offset_end {
-                                    value.merge_precise_single_offset(
-                                        id,
-                                        offset,
-                                        &InitializationStatus::Init {
-                                            addresses: [def.tid.clone()].into(),
-                                        },
-                                    );
+                                if offset_end - offset_start < 256 {
+                                    for offset in offset_start..=offset_end {
+                                        value.merge_precise_single_offset(
+                                            id,
+                                            offset,
+                                            &InitializationStatus::Init {
+                                                addresses: [def.tid.clone()].into(),
+                                            },
+                                        );
+                                    }
+                                } else {
+                                    println!("fat interval at store in detecting!")
                                 }
                             }
                         }
@@ -362,6 +366,7 @@ fn extract_results<'a>(
     }
 
     for edge in graph.edge_indices() {
+        println!("edge: {}", edge.index());
         // Iterating external calls, that are not white listed
         if let Edge::ExternCallStub(call) = graph[edge] {
             if let Jmp::Call { target, return_: _ } = &call.term {
@@ -393,17 +398,18 @@ fn extract_results<'a>(
                 let func_sig = computation.get_context().get_context().function_signatures;
                 if let Some(signature) = func_sig.get(target) {
                     let arguments = &signature.parameters.keys().cloned().collect();
+                    //dbg!(&arguments);
                     let node_index = graph.edge_endpoints(edge).unwrap().0;
-                    let state = computation
-                        .get_node_value(node_index)
-                        .unwrap()
-                        .unwrap_value();
-                    if let Node::CallSource { source: _, target } = graph[node_index] {
-                        let callee = &target.1.term;
-                        if let Some(warning) =
-                            is_call_with_uninit_parameter(arguments, &call.tid, pir, state, callee)
-                        {
-                            cwe_warnings.push(warning);
+                    if let Some(uu) = computation.get_node_value(node_index) {
+                        let state = uu.unwrap_value();
+
+                        if let Node::CallSource { source: _, target } = graph[node_index] {
+                            let callee = &target.1.term;
+                            if let Some(warning) = is_call_with_uninit_parameter(
+                                arguments, &call.tid, pir, state, callee,
+                            ) {
+                                cwe_warnings.push(warning);
+                            }
                         }
                     }
                 }
