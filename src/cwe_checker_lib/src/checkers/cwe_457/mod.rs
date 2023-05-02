@@ -5,7 +5,9 @@ use crate::{
     analysis::{
         self,
         fixpoint::Computation,
-        forward_interprocedural_fixpoint::{create_computation, GeneralizedContext},
+        forward_interprocedural_fixpoint::{
+            create_computation, Context as generalContext, GeneralizedContext,
+        },
         graph::Edge,
         pointer_inference::{PointerInference, State as PiState},
         vsa_results::VsaResult,
@@ -243,75 +245,65 @@ fn find_uninit_access_in_blk<'a>(
     let mut cwe_warnings = Vec::new();
 
     for def in &blk.defs {
-        //println!("\t{}: {}", def.tid.address, def.term);
-        match &def.term {
-            Def::Load { .. } => {
-                if let Some(data_domain) = pir.eval_address_at_def(&def.tid) {
-                    for source_id in data_domain.get_relative_values().keys() {
-                        if let Some(mem_region) = value.tracked_objects.get(source_id) {
-                            let interval =
-                                data_domain.get_relative_values().get(source_id).unwrap();
-                            if source_id.to_string().contains("instr") {
-                                // it is a heap object
-                                if mem_region.contains_uninit_within_interval(interval, false) {
+        if let Def::Load { .. } = &def.term {
+            if let Some(data_domain) = pir.eval_address_at_def(&def.tid) {
+                for source_id in data_domain.get_relative_values().keys() {
+                    if let Some(mem_region) = value.tracked_objects.get(source_id) {
+                        let interval = data_domain.get_relative_values().get(source_id).unwrap();
+                        if source_id.to_string().contains("instr") {
+                            // it is a heap object
+                            if let Some(uninit) =
+                                mem_region.contains_uninit_within_interval(interval, false)
+                            {
+                                if uninit {
                                     cwe_warnings.push(generate_cwe_warning_for_uninit_access_(
                                         &def.tid, sub, false,
-                                    ))
-                                }
-                                if let Some(maybe_init) = mem_region
-                                    .get_maybe_init_locatons_within_interval(interval, false)
-                                {
-                                    cwe_warnings.push(generate_cwe_warning_for_maybe_uninit_access(
-                                        &def.tid, sub, false, maybe_init,
-                                    ))
+                                    ));
+                                    let (s, e) = interval.try_to_offset_interval().unwrap();
+                                    println!("{} : interval [{}:{}]", def.tid, s, e);
                                 }
                             } else {
-                                // it is a stack frame
-                                if mem_region.contains_uninit_within_interval(interval, true) {
+                                println!("Would trigger CWE waring, because interval is not exact...\n({} stack: {})", def.tid, false);
+                            }
+                            if let Some(maybe_init) =
+                                mem_region.get_maybe_init_locatons_within_interval(interval, false)
+                            {
+                                cwe_warnings.push(generate_cwe_warning_for_maybe_uninit_access(
+                                    &def.tid, sub, false, maybe_init,
+                                ))
+                            }
+                        } else {
+                            // it is a stack frame
+                            if let Some(uninit) =
+                                mem_region.contains_uninit_within_interval(interval, true)
+                            {
+                                if uninit {
                                     cwe_warnings.push(generate_cwe_warning_for_uninit_access_(
                                         &def.tid, sub, true,
-                                    ))
+                                    ));
+                                    let (s, e) = interval.try_to_offset_interval().unwrap();
+                                    println!("{} : interval [{}:{}]", def.tid, s, e);
                                 }
-                                if let Some(maybe_init) = mem_region
-                                    .get_maybe_init_locatons_within_interval(interval, true)
-                                {
-                                    cwe_warnings.push(generate_cwe_warning_for_maybe_uninit_access(
-                                        &def.tid, sub, true, maybe_init,
-                                    ))
-                                }
+                            } else {
+                                println!("Would trigger CWE waring, because interval is not exact...\n({} stack: {})", def.tid, true);
                             }
-                        }
-                    }
-                }
-            }
-            Def::Store { .. } => {
-                if let Some(data_domain) = pir.eval_address_at_def(&def.tid) {
-                    for (id, interval) in data_domain.get_relative_values().iter() {
-                        if value.tracked_objects.contains_key(id) {
-                            if let Ok((offset_start, offset_end)) =
-                                interval.try_to_offset_interval()
+                            if let Some(maybe_init) =
+                                mem_region.get_maybe_init_locatons_within_interval(interval, true)
                             {
-                                if offset_end - offset_start < 256 {
-                                    for offset in offset_start..=offset_end {
-                                        value.merge_precise_single_offset(
-                                            id,
-                                            offset,
-                                            &InitializationStatus::Init {
-                                                addresses: [def.tid.clone()].into(),
-                                            },
-                                        );
-                                    }
-                                } else {
-                                    println!("fat interval at store in detecting!")
-                                }
+                                cwe_warnings.push(generate_cwe_warning_for_maybe_uninit_access(
+                                    &def.tid, sub, true, maybe_init,
+                                ))
                             }
                         }
                     }
                 }
             }
-
-            _ => (),
         }
+        value = computation
+            .get_context()
+            .get_context()
+            .update_def(&value, def)
+            .unwrap();
     }
     cwe_warnings.dedup();
     cwe_warnings
@@ -366,27 +358,25 @@ fn extract_results<'a>(
     }
 
     for edge in graph.edge_indices() {
-        println!("edge: {}", edge.index());
         // Iterating external calls, that are not white listed
         if let Edge::ExternCallStub(call) = graph[edge] {
             if let Jmp::Call { target, return_: _ } = &call.term {
                 if let Some(ext_sym) = pir.get_context().extern_symbol_map.get(target) {
                     if !extern_symbols_whitelist.contains(&ext_sym.name) {
                         let node_index = graph.edge_endpoints(edge).unwrap().0;
-                        let state = computation
-                            .get_node_value(node_index)
-                            .unwrap()
-                            .unwrap_value();
-                        let callee = graph[node_index].get_sub();
+                        if let Some(pir_state) = computation.get_node_value(node_index) {
+                            let state = pir_state.unwrap_value();
+                            let callee = graph[node_index].get_sub();
 
-                        if let Some(warning) = is_call_with_uninit_parameter(
-                            &ext_sym.parameters,
-                            target,
-                            pir,
-                            state,
-                            &callee.term,
-                        ) {
-                            cwe_warnings.push(warning);
+                            if let Some(warning) = is_call_with_uninit_parameter(
+                                &ext_sym.parameters,
+                                target,
+                                pir,
+                                state,
+                                &callee.term,
+                            ) {
+                                cwe_warnings.push(warning);
+                            }
                         }
                     }
                 }
@@ -400,8 +390,8 @@ fn extract_results<'a>(
                     let arguments = &signature.parameters.keys().cloned().collect();
                     //dbg!(&arguments);
                     let node_index = graph.edge_endpoints(edge).unwrap().0;
-                    if let Some(uu) = computation.get_node_value(node_index) {
-                        let state = uu.unwrap_value();
+                    if let Some(pir_state) = computation.get_node_value(node_index) {
+                        let state = pir_state.unwrap_value();
 
                         if let Node::CallSource { source: _, target } = graph[node_index] {
                             let callee = &target.1.term;
@@ -451,6 +441,7 @@ pub fn check_cwe(
 
     let mut cwe_warnings = extract_results(computation, config.extern_symbol_whitelist);
     //println!("\n###########\nFinal Results\n#########");
+    cwe_warnings.dedup();
     cwe_warnings.dedup();
 
     (vec![], cwe_warnings)

@@ -1,5 +1,5 @@
 use super::{state::State, InitializationStatus};
-use crate::abstract_domain::{DataDomain, SizedDomain, TryToBitvec, TryToInterval};
+use crate::abstract_domain::{AbstractDomain, DataDomain, SizedDomain, TryToBitvec, TryToInterval};
 use crate::analysis::pointer_inference::{PointerInference, ValueDomain};
 use crate::analysis::{
     function_signature::FunctionSignature, graph::Graph, vsa_results::VsaResult,
@@ -207,25 +207,38 @@ impl<'a> crate::analysis::forward_interprocedural_fixpoint::Context<'a> for Cont
                     if value.tracked_objects.contains_key(id) {
                         // We track this mem object
                         //println!("we do track: {} and interval is top: {}", id, interval.is_top());
-                        if let Ok((offset_start, offset_end)) = interval.try_to_offset_interval() {
-                            let mut updated = value.clone();
-                            if offset_end - offset_start < 256 {
-                                for offset in offset_start..=offset_end {
+                        if let Ok(mem_offset) = interval.try_to_offset() {
+                            if let Some(value_domain) = self.pir.eval_value_at_def(&def.tid) {
+                                let mut updated = value.clone();
+
+                                for value_offset in 0..value_domain.bytesize().into() {
                                     updated.merge_precise_single_offset(
                                         id,
-                                        offset,
+                                        mem_offset + value_offset as i64,
                                         &InitializationStatus::Init {
                                             addresses: [def.tid.clone()].into(),
                                         },
                                     );
                                 }
+                                //println!("{}", updated.to_string());
                                 return Some(updated);
                             } else {
-                                println!("interval: [{}:{}] is too large (interval_bytesize?: {})! skipping this Store {}...", offset_start, offset_end, interval.bytesize(), def.term);
+                                println!(
+                                    "{} : could not determine value of store (update_def)",
+                                    def.tid
+                                );
                             }
+                        } else {
+                            println!(
+                                "{} : offset is not unique: (top: {}) @ (update_def)",
+                                def.tid,
+                                interval.is_top()
+                            )
                         }
                     }
                 }
+            } else {
+                println!("{} : could not get address of store (update_def)", def.tid);
             }
         }
         Some(value.clone())

@@ -128,24 +128,23 @@ impl MemRegion<InitializationStatus> {
         &self,
         interval: &IntervalDomain,
         ignore_non_neg_offsets: bool,
-    ) -> bool {
+    ) -> Option<bool> {
         if let Ok((lower_bound, upper_bound)) = interval.try_to_offset_interval().as_mut() {
             if ignore_non_neg_offsets {
                 if *lower_bound > 0 && *upper_bound > 0 {
-                    return false;
+                    return Some(false);
                 } else if *lower_bound > 0 {
                     *lower_bound = 0;
                 }
             }
             for i in *lower_bound..=*upper_bound {
                 if let InitializationStatus::Uninit = self.get_init_status_at_byte_index(i) {
-                    return true;
+                    return Some(true);
                 }
             }
-            false
+            Some(false)
         } else {
-            //println!("could not determine offset interval, so consider it uninit!");
-            true
+            None
         }
     }
 
