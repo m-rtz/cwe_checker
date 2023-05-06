@@ -73,11 +73,7 @@ impl State {
             if let Ok((lower_offset, upper_offset)) = offset.try_to_offset_interval() {
                 if let Ok(lower_bound) = self.object_lower_bounds.get(id).unwrap().try_to_offset() {
                     if lower_bound > lower_offset {
-                        out_of_bounds_access_warnings.push(format!("For the object ID {} access to the offset {} may be smaller than the lower object bound of {}.",
-                            id,
-                            lower_offset,
-                            lower_bound,
-                        ));
+                        out_of_bounds_access_warnings.push(format!("For the object ID {id} access to the offset {lower_offset} may be smaller than the lower object bound of {lower_bound}."));
                         if let (
                             Some(BoundsMetadata {
                                 source: Some(source),
@@ -93,12 +89,14 @@ impl State {
                                 context,
                             );
                             out_of_bounds_access_warnings
-                                .push(format!("Relevant callgraph TIDs: [{}]", call_sequence_tids));
+                                .push(format!("Relevant callgraph TIDs: [{call_sequence_tids}]"));
                         } else {
-                            out_of_bounds_access_warnings.push(format!(
-                                "Relevant callgraph TIDs: [{}]",
-                                self.stack_id.get_tid()
-                            ));
+                            let mut callgraph_tids = format!("{}", self.stack_id.get_tid());
+                            for call_tid in id.get_path_hints() {
+                                callgraph_tids += &format!(", {call_tid}");
+                            }
+                            out_of_bounds_access_warnings
+                                .push(format!("Relevant callgraph TIDs: [{callgraph_tids}]",));
                         }
                         // Replace the bound with `Top` to prevent duplicate CWE warnings with the same root cause.
                         self.object_lower_bounds
@@ -128,12 +126,14 @@ impl State {
                                 context,
                             );
                             out_of_bounds_access_warnings
-                                .push(format!("Relevant callgraph TIDs: [{}]", call_sequence_tids));
+                                .push(format!("Relevant callgraph TIDs: [{call_sequence_tids}]"));
                         } else {
-                            out_of_bounds_access_warnings.push(format!(
-                                "Relevant callgraph TIDs: [{}]",
-                                self.stack_id.get_tid()
-                            ));
+                            let mut callgraph_tids = format!("{}", self.stack_id.get_tid());
+                            for call_tid in id.get_path_hints() {
+                                callgraph_tids += &format!(", {call_tid}");
+                            }
+                            out_of_bounds_access_warnings
+                                .push(format!("Relevant callgraph TIDs: [{callgraph_tids}]",));
                         }
                         // Replace the bound with `Top` to prevent duplicate CWE warnings with the same root cause.
                         self.object_upper_bounds
@@ -204,13 +204,13 @@ impl State {
         let lower_bounds: Vec<_> = self
             .object_lower_bounds
             .iter()
-            .map(|(id, bound)| Value::String(format!("{}: {}", id, bound)))
+            .map(|(id, bound)| Value::String(format!("{id}: {bound}")))
             .collect();
         state_map.insert("lower_bounds".to_string(), Value::Array(lower_bounds));
         let upper_bounds: Vec<_> = self
             .object_upper_bounds
             .iter()
-            .map(|(id, bound)| Value::String(format!("{}: {}", id, bound)))
+            .map(|(id, bound)| Value::String(format!("{id}: {bound}")))
             .collect();
         state_map.insert("upper_bounds".to_string(), Value::Array(upper_bounds));
 
@@ -265,15 +265,15 @@ fn collect_tids_for_cwe_warning(
     }
     // Build a string out of the TID list
     tids.iter()
-        .map(|tid| format!("{}", tid))
-        .reduce(|accum, elem| format!("{}, {}", accum, elem))
+        .map(|tid| format!("{tid}"))
+        .reduce(|accum, elem| format!("{accum}, {elem}"))
         .unwrap()
 }
 
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use crate::intermediate_representation::Variable;
+    use crate::{intermediate_representation::*, variable};
 
     #[test]
     fn test_new() {
@@ -283,7 +283,7 @@ pub mod tests {
             &FunctionSignature::mock_x64(),
             context.project,
         );
-        let stack_id = AbstractIdentifier::from_var(Tid::new("func"), &Variable::mock("RSP", 8));
+        let stack_id = AbstractIdentifier::from_var(Tid::new("func"), &variable!("RSP:8"));
 
         assert_eq!(state.stack_id, stack_id);
         assert_eq!(state.object_lower_bounds.len(), 1);
@@ -306,7 +306,7 @@ pub mod tests {
             &FunctionSignature::mock_x64(),
             context.project,
         );
-        let stack_id = AbstractIdentifier::from_var(Tid::new("func"), &Variable::mock("RSP", 8));
+        let stack_id = AbstractIdentifier::from_var(Tid::new("func"), &variable!("RSP:8"));
         // access in bounds
         let address = Data::from_target(stack_id.clone(), Bitvector::from_i64(-12).into());
         assert!(state

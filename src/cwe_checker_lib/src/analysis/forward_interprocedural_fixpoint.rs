@@ -333,9 +333,10 @@ mod tests {
                 create_computation_with_top_down_worklist_order,
             },
         },
+        expr,
         intermediate_representation::*,
     };
-    use std::collections::{BTreeMap, HashMap, HashSet};
+    use std::collections::{BTreeMap, HashMap};
 
     fn new_block(name: &str) -> Term<Blk> {
         Term {
@@ -353,7 +354,7 @@ mod tests {
         let mut callee_block = new_block("callee block");
         callee_block.term.jmps.push(Term {
             tid: Tid::new("ret"),
-            term: Jmp::Return(Expression::const_from_i32(42)),
+            term: Jmp::Return(expr!("42:4")),
         });
 
         let called_function = Term {
@@ -402,9 +403,7 @@ mod tests {
     /// Checks if the nodes corresponding to the callee function are first in the worklist.
     fn check_bottom_up_worklist() {
         let project = mock_project();
-        let extern_subs = HashSet::new();
-
-        let graph = crate::analysis::graph::get_program_cfg(&project.program, extern_subs);
+        let graph = crate::analysis::graph::get_program_cfg(&project.program);
         let context = Context::new(&graph);
         let comp = create_computation_with_bottom_up_worklist_order(context, Some(HashMap::new()));
         // The last two nodes should belong to the callee
@@ -422,9 +421,7 @@ mod tests {
     #[test]
     fn check_top_down_worklist() {
         let project = mock_project();
-        let extern_subs = HashSet::new();
-
-        let graph = crate::analysis::graph::get_program_cfg(&project.program, extern_subs);
+        let graph = crate::analysis::graph::get_program_cfg(&project.program);
         let context = Context::new(&graph);
         let comp = create_computation_with_top_down_worklist_order(context, Some(HashMap::new()));
         // The first two nodes should belong to the callee

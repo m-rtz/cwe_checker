@@ -50,7 +50,7 @@ impl<'a, 'b> ExternCallHandler<'a, 'b> {
                 warnings.append(&mut self.check_buffer_size(1, 2));
             }
             "fread" | "fwrite" => warnings.append(&mut self.check_buffer_size_and_count(0, 1, 2)),
-            "qsort" | "qsort_r" => warnings.append(&mut self.check_buffer_size_and_count(0, 2, 1)),
+            "qsort" | "qsort_s" => warnings.append(&mut self.check_buffer_size_and_count(0, 2, 1)),
             _ => self.handle_generic_call(),
         }
 
@@ -155,7 +155,7 @@ impl<'a, 'b> ExternCallHandler<'a, 'b> {
     /// Compute the size of a buffer from a corresponding size value.
     /// Returns `None` if no absolute size value could be determined for any reason.
     ///
-    /// If a range of posible sizes is detected, use the smallest possible size,
+    /// If a range of possible sizes is detected, use the smallest possible size,
     /// as using larger sizes would lead to too many false positive CWE warnings.
     fn compute_buffer_size_from_data_domain(&self, size: Data) -> Option<ByteSize> {
         let size = self.context.recursively_substitute_param_values(&size);

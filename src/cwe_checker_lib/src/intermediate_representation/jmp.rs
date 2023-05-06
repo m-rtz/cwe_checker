@@ -64,9 +64,9 @@ pub enum Jmp {
 impl fmt::Display for Jmp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Jmp::Branch(tid) => write!(f, "Jump to {}", tid),
-            Jmp::BranchInd(expr) => write!(f, "Jump to {}", expr),
-            Jmp::CBranch { target, condition } => write!(f, "If {} jump to {}", condition, target),
+            Jmp::Branch(tid) => write!(f, "Jump to {tid}"),
+            Jmp::BranchInd(expr) => write!(f, "Jump to {expr}"),
+            Jmp::CBranch { target, condition } => write!(f, "If {condition} jump to {target}"),
             Jmp::Call { target, return_ } => write!(
                 f,
                 "call {} ret {}",
@@ -79,7 +79,7 @@ impl fmt::Display for Jmp {
                 target,
                 return_.as_ref().unwrap_or(&Tid::new("?"))
             ),
-            Jmp::Return(expr) => write!(f, "ret {}", expr),
+            Jmp::Return(expr) => write!(f, "ret {expr}"),
             Jmp::CallOther {
                 description,
                 return_,
@@ -89,26 +89,6 @@ impl fmt::Display for Jmp {
                 description,
                 return_.as_ref().unwrap_or(&Tid::new("?"))
             ),
-        }
-    }
-}
-
-#[cfg(test)]
-pub mod tests {
-    use super::*;
-
-    impl Jmp {
-        /// Create a mock call to a TID with the given `target` and `return_`
-        /// as the names of the target and return TIDs.
-        pub fn mock_call(target: &str, return_: Option<&str>) -> Term<Jmp> {
-            let call = Jmp::Call {
-                target: Tid::new(target.to_string()),
-                return_: return_.map(|tid_name| Tid::new(tid_name)),
-            };
-            Term {
-                tid: Tid::new(format!("call_{}", target.to_string())),
-                term: call,
-            }
         }
     }
 }

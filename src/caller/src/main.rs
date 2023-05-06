@@ -79,12 +79,12 @@ fn main() -> Result<(), Error> {
 /// Return `Ok(file_path)` only if `file_path` points to an existing file.
 fn check_file_existence(file_path: &str) -> Result<String, String> {
     if std::fs::metadata(file_path)
-        .map_err(|err| format!("{}", err))?
+        .map_err(|err| format!("{err}"))?
         .is_file()
     {
         Ok(file_path.to_string())
     } else {
-        Err(format!("{} is not a file.", file_path))
+        Err(format!("{file_path} is not a file."))
     }
 }
 
@@ -95,7 +95,7 @@ fn run_with_ghidra(args: &CmdlineArgs) -> Result<(), Error> {
         // Only print the module versions and then quit.
         println!("[cwe_checker] module_versions:");
         for module in modules.iter() {
-            println!("{}", module);
+            println!("{module}");
         }
         return Ok(());
     }
@@ -130,14 +130,8 @@ fn run_with_ghidra(args: &CmdlineArgs) -> Result<(), Error> {
         disassemble_binary(&binary_file_path, bare_metal_config_opt, args.verbose)?;
 
     // Generate the control flow graph of the program
-    let extern_sub_tids = project
-        .program
-        .term
-        .extern_symbols
-        .keys()
-        .cloned()
-        .collect();
-    let control_flow_graph = graph::get_program_cfg(&project.program, extern_sub_tids);
+    let (control_flow_graph, mut logs_graph) = graph::get_program_cfg_with_logs(&project.program);
+    all_logs.append(&mut logs_graph);
 
     let analysis_results = AnalysisResults::new(&binary, &control_flow_graph, &project);
 
@@ -204,6 +198,7 @@ fn run_with_ghidra(args: &CmdlineArgs) -> Result<(), Error> {
         all_logs.append(&mut logs);
         all_cwes.append(&mut cwes);
     }
+    all_cwes.sort();
 
     // Print the results of the modules.
     if args.quiet {
@@ -235,7 +230,7 @@ fn filter_modules_for_partial_run(
             } else if module_name.is_empty() {
                 None
             } else {
-                panic!("Error: {} is not a valid module name.", module_name)
+                panic!("Error: {module_name} is not a valid module name.")
             }
         })
         .collect();
