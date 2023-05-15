@@ -156,18 +156,20 @@ fn generate_cwe_warning_for_uninit_access_(
     location: &Tid,
     sub: &Sub,
     is_stack_allocation: bool,
+    details: String
 ) -> CweWarning {
     CweWarning::new(
         CWE_MODULE.name,
         CWE_MODULE.version,
         format!(
-            "Access of uninitialized {} variable at 0x{} ({})",
+            "Access of uninitialized {} variable at 0x{} ({}) {}",
             match is_stack_allocation {
                 true => "stack",
                 false => "heap",
             },
             location.address,
-            sub.name
+            sub.name,
+            details
         ),
     )
     .tids(vec![format!("{}", location)])
@@ -181,15 +183,17 @@ fn generate_cwe_warning_for_maybe_uninit_access(
     sub: &Sub,
     is_stack_allocation: bool,
     maybe_uninit_locations: HashMap<i64, HashSet<Tid>>,
+    details: String
 ) -> CweWarning {
     let mut description = format!(
-        "Access of potentially uninitialized {} variable at 0x{} ({}).\n",
+        "Access of potentially uninitialized {} variable at 0x{} ({}). {}\n",
         match is_stack_allocation {
             true => "stack",
             false => "heap",
         },
         location.address,
-        sub.name
+        sub.name,
+        details
     );
     description.push_str("Offset\tPotential initialization location\n");
     for (offset, init_locations) in maybe_uninit_locations {
@@ -239,10 +243,11 @@ fn find_uninit_access_in_blk<'a>(
     value: &State,
     sub: &Sub,
     blk: &Blk,
-) -> Vec<CweWarning> {
+) -> (Vec<CweWarning>, HashMap<String, String> ){
     let pir = computation.get_context().get_context().pir;
     let mut value = value.clone();
     let mut cwe_warnings = Vec::new();
+    let mut warning_info: HashMap<String, String> = HashMap::new();
 
     for def in &blk.defs {
         if let Def::Load { .. } = &def.term {
@@ -257,20 +262,25 @@ fn find_uninit_access_in_blk<'a>(
                             {
                                 if uninit {
                                     cwe_warnings.push(generate_cwe_warning_for_uninit_access_(
-                                        &def.tid, sub, false,
+                                        &def.tid, sub, false, "".to_string()
                                     ));
                                     let (s, e) = interval.try_to_offset_interval().unwrap();
-                                    println!("{} : interval [{}:{}]", def.tid, s, e);
+                                    warning_info.insert(def.tid.to_string(), format!("[{} : {}]", s, e));
                                 }
                             } else {
-                                println!("Would trigger CWE waring, because interval is not exact...\n({} stack: {})", def.tid, false);
+                                cwe_warnings.push(generate_cwe_warning_for_uninit_access_(
+                                    &def.tid, sub, false, "".to_string()
+                                ));
+                                warning_info.insert(def.tid.to_string(), "Could not get offset interval".into());
                             }
                             if let Some(maybe_init) =
                                 mem_region.get_maybe_init_locatons_within_interval(interval, false)
                             {
                                 cwe_warnings.push(generate_cwe_warning_for_maybe_uninit_access(
-                                    &def.tid, sub, false, maybe_init,
-                                ))
+                                    &def.tid, sub, false, maybe_init, "".to_string()
+                                ));
+                                let (s, e) = interval.try_to_offset_interval().unwrap();
+                                    warning_info.insert(def.tid.to_string(), format!("[{} : {}]", s, e));
                             }
                         } else {
                             // it is a stack frame
@@ -279,24 +289,33 @@ fn find_uninit_access_in_blk<'a>(
                             {
                                 if uninit {
                                     cwe_warnings.push(generate_cwe_warning_for_uninit_access_(
-                                        &def.tid, sub, true,
+                                        &def.tid, sub, true, "".to_string()
                                     ));
                                     let (s, e) = interval.try_to_offset_interval().unwrap();
-                                    println!("{} : interval [{}:{}]", def.tid, s, e);
+                                    warning_info.insert(def.tid.to_string(), format!("[{} : {}]", s, e));
                                 }
                             } else {
-                                println!("Would trigger CWE waring, because interval is not exact...\n({} stack: {})", def.tid, true);
+                                cwe_warnings.push(generate_cwe_warning_for_uninit_access_(
+                                    &def.tid, sub, true, "".to_string()
+                                ));
+                                warning_info.insert(def.tid.to_string(), "Could not get offset interval".into());
                             }
                             if let Some(maybe_init) =
                                 mem_region.get_maybe_init_locatons_within_interval(interval, true)
                             {
                                 cwe_warnings.push(generate_cwe_warning_for_maybe_uninit_access(
-                                    &def.tid, sub, true, maybe_init,
-                                ))
+                                    &def.tid, sub, true, maybe_init,"".to_string()
+                                ));
+                                let (s, e) = interval.try_to_offset_interval().unwrap();
+                                    warning_info.insert(def.tid.to_string(), format!("[{} : {}]", s, e));
                             }
                         }
+                    } else {
+                        warning_info.insert(def.tid.to_string(), "value.tracked_objects.get(source_id) == None".into());
                     }
                 }
+            } else {
+                warning_info.insert(def.tid.to_string(), "eval_address_at_def(&def.tid) == None".into());
             }
         }
         value = computation
@@ -305,8 +324,9 @@ fn find_uninit_access_in_blk<'a>(
             .update_def(&value, def)
             .unwrap();
     }
+    
     cwe_warnings.dedup();
-    cwe_warnings
+    (cwe_warnings, warning_info)
 }
 
 /// Checks if any parameter referes to an entirely uninitalized memory object and retruns a warning if true.
@@ -337,6 +357,7 @@ fn extract_results<'a>(
     extern_symbols_whitelist: Vec<String>,
 ) -> Vec<CweWarning> {
     let mut cwe_warnings = Vec::new();
+    let mut warning_info = HashMap::new();
     let graph = computation.get_graph();
     let pir = computation.get_context().get_context().pir;
     for node in graph.node_indices() {
@@ -344,18 +365,22 @@ fn extract_results<'a>(
             // BlkEnd wirklich nötig hier?
             if let Some(node_value) = computation.get_node_value(node) {
                 //println!("\n{}", graph[node]);
-                cwe_warnings.append(
-                    find_uninit_access_in_blk(
-                        &computation,
-                        node_value.unwrap_value(),
-                        &graph[node].get_sub().term,
-                        &computation.get_graph()[node].get_block().term,
-                    )
-                    .as_mut(),
+                let (mut warnings, info) = find_uninit_access_in_blk(
+                    &computation,
+                    node_value.unwrap_value(),
+                    &graph[node].get_sub().term,
+                    &computation.get_graph()[node].get_block().term,
                 );
+
+
+
+                
+                cwe_warnings.append(&mut warnings);
+                warning_info.extend(info);
             }
         }
     }
+    println!("{}", serde_json::to_string_pretty(&warning_info).unwrap());
 
     for edge in graph.edge_indices() {
         // Iterating external calls, that are not white listed

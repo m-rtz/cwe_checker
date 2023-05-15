@@ -224,21 +224,23 @@ impl<'a> crate::analysis::forward_interprocedural_fixpoint::Context<'a> for Cont
                                 return Some(updated);
                             } else {
                                 println!(
-                                    "{} : could not determine value of store (update_def)",
+                                    "{} : pir.eval_value_at_def(&def.tid) == None (update_def)",
                                     def.tid
                                 );
                             }
                         } else {
                             println!(
-                                "{} : offset is not unique: (top: {}) @ (update_def)",
+                                "{} : offset interval.try_to_offset() == Err (top: {})",
                                 def.tid,
                                 interval.is_top()
                             )
                         }
+                    } else {
+                        println!("{} : value.tracked_objects.contains_key(id) == false", def.tid);
                     }
                 }
             } else {
-                println!("{} : could not get address of store (update_def)", def.tid);
+                println!("{} : eval_address_at_def(&def.tid) == None", def.tid);
             }
         }
         Some(value.clone())
