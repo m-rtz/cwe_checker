@@ -226,11 +226,10 @@ impl MemRegion<InitializationStatus> {
             self.merge_at_byte_index(*offset, status);
         }
         // cover all offsets in self, that are uninit in other
-        for (offset, _status) in self.clone().entry_map(){
-            if let InitializationStatus::Uninit = other.get_init_status_at_byte_index(*offset){
+        for (offset, _status) in self.clone().entry_map() {
+            if let InitializationStatus::Uninit = other.get_init_status_at_byte_index(*offset) {
                 self.merge_at_byte_index(*offset, &InitializationStatus::Uninit);
             }
         }
-
     }
 }

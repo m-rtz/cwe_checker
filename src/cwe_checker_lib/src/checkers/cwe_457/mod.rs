@@ -1,7 +1,7 @@
 mod context;
 use self::{context::Context, init_status::InitializationStatus, state::State};
 use crate::{
-    abstract_domain::{AbstractIdentifier, TryToInterval},
+    abstract_domain::{AbstractIdentifier, TryToBitvec, TryToInterval},
     analysis::{
         self,
         fixpoint::Computation,
@@ -156,7 +156,7 @@ fn generate_cwe_warning_for_uninit_access_(
     location: &Tid,
     sub: &Sub,
     is_stack_allocation: bool,
-    details: String
+    details: String,
 ) -> CweWarning {
     CweWarning::new(
         CWE_MODULE.name,
@@ -183,7 +183,7 @@ fn generate_cwe_warning_for_maybe_uninit_access(
     sub: &Sub,
     is_stack_allocation: bool,
     maybe_uninit_locations: HashMap<i64, HashSet<Tid>>,
-    details: String
+    details: String,
 ) -> CweWarning {
     let mut description = format!(
         "Access of potentially uninitialized {} variable at 0x{} ({}). {}\n",
@@ -243,7 +243,7 @@ fn find_uninit_access_in_blk<'a>(
     value: &State,
     sub: &Sub,
     blk: &Blk,
-) -> (Vec<CweWarning>, HashMap<String, String> ){
+) -> (Vec<CweWarning>, HashMap<String, String>) {
     let pir = computation.get_context().get_context().pir;
     let mut value = value.clone();
     let mut cwe_warnings = Vec::new();
@@ -252,70 +252,100 @@ fn find_uninit_access_in_blk<'a>(
     for def in &blk.defs {
         if let Def::Load { .. } = &def.term {
             if let Some(data_domain) = pir.eval_address_at_def(&def.tid) {
-                for source_id in data_domain.get_relative_values().keys() {
+                if let Some((source_id, offset_interval)) = data_domain.get_if_unique_target() {
                     if let Some(mem_region) = value.tracked_objects.get(source_id) {
-                        let interval = data_domain.get_relative_values().get(source_id).unwrap();
-                        if source_id.to_string().contains("instr") {
-                            // it is a heap object
-                            if let Some(uninit) =
-                                mem_region.contains_uninit_within_interval(interval, false)
-                            {
-                                if uninit {
+                        if let Ok(offset) = offset_interval.try_to_offset() {
+                            if source_id.to_string().contains("instr") {
+                                // it is a heap object
+                                if let InitializationStatus::Uninit =
+                                    mem_region.get_init_status_at_byte_index(offset)
+                                {
                                     cwe_warnings.push(generate_cwe_warning_for_uninit_access_(
-                                        &def.tid, sub, false, "".to_string()
+                                        &def.tid,
+                                        sub,
+                                        false,
+                                        "".to_string(),
                                     ));
-                                    let (s, e) = interval.try_to_offset_interval().unwrap();
-                                    warning_info.insert(def.tid.to_string(), format!("[{} : {}]", s, e));
+
+                                    warning_info
+                                        .insert(def.tid.to_string(), format!("offset: {}", offset));
+                                } else if let InitializationStatus::MaybeInit { addresses } =
+                                    mem_region.get_init_status_at_byte_index(offset)
+                                {
+                                    cwe_warnings.push(
+                                        generate_cwe_warning_for_maybe_uninit_access(
+                                            &def.tid,
+                                            sub,
+                                            false,
+                                            HashMap::from([(offset, addresses)]),
+                                            "".to_string(),
+                                        ),
+                                    );
+                                    warning_info
+                                        .insert(def.tid.to_string(), format!("offset: {}", offset));
                                 }
                             } else {
-                                cwe_warnings.push(generate_cwe_warning_for_uninit_access_(
-                                    &def.tid, sub, false, "".to_string()
-                                ));
-                                warning_info.insert(def.tid.to_string(), "Could not get offset interval".into());
+                                // it is a stack frame
+                                if let InitializationStatus::Uninit =
+                                    mem_region.get_init_status_at_byte_index(offset)
+                                {
+                                    cwe_warnings.push(generate_cwe_warning_for_uninit_access_(
+                                        &def.tid,
+                                        sub,
+                                        true,
+                                        "".to_string(),
+                                    ));
+
+                                    warning_info
+                                        .insert(def.tid.to_string(), format!("offset: {}", offset));
+                                } else if let InitializationStatus::MaybeInit { addresses } =
+                                    mem_region.get_init_status_at_byte_index(offset)
+                                {
+                                    cwe_warnings.push(
+                                        generate_cwe_warning_for_maybe_uninit_access(
+                                            &def.tid,
+                                            sub,
+                                            true,
+                                            HashMap::from([(offset, addresses)]),
+                                            "".to_string(),
+                                        ),
+                                    );
+                                    warning_info
+                                        .insert(def.tid.to_string(), format!("offset: {}", offset));
+                                }
                             }
-                            if let Some(maybe_init) =
-                                mem_region.get_maybe_init_locatons_within_interval(interval, false)
-                            {
-                                cwe_warnings.push(generate_cwe_warning_for_maybe_uninit_access(
-                                    &def.tid, sub, false, maybe_init, "".to_string()
-                                ));
-                                let (s, e) = interval.try_to_offset_interval().unwrap();
-                                    warning_info.insert(def.tid.to_string(), format!("[{} : {}]", s, e));
+                        } if let Ok((s, e)) = offset_interval.try_to_offset_interval() {
+                            if s != e {
+                                warning_info.insert(
+                                    def.tid.to_string(),
+                                    format!("interval not precise: [{}:{}]", s, e).into(),
+                                );
+
                             }
+                            
                         } else {
-                            // it is a stack frame
-                            if let Some(uninit) =
-                                mem_region.contains_uninit_within_interval(interval, true)
-                            {
-                                if uninit {
-                                    cwe_warnings.push(generate_cwe_warning_for_uninit_access_(
-                                        &def.tid, sub, true, "".to_string()
-                                    ));
-                                    let (s, e) = interval.try_to_offset_interval().unwrap();
-                                    warning_info.insert(def.tid.to_string(), format!("[{} : {}]", s, e));
-                                }
-                            } else {
-                                cwe_warnings.push(generate_cwe_warning_for_uninit_access_(
-                                    &def.tid, sub, true, "".to_string()
-                                ));
-                                warning_info.insert(def.tid.to_string(), "Could not get offset interval".into());
-                            }
-                            if let Some(maybe_init) =
-                                mem_region.get_maybe_init_locatons_within_interval(interval, true)
-                            {
-                                cwe_warnings.push(generate_cwe_warning_for_maybe_uninit_access(
-                                    &def.tid, sub, true, maybe_init,"".to_string()
-                                ));
-                                let (s, e) = interval.try_to_offset_interval().unwrap();
-                                    warning_info.insert(def.tid.to_string(), format!("[{} : {}]", s, e));
-                            }
+                            warning_info
+                                .insert(def.tid.to_string(), format!("interval error",).into());
                         }
                     } else {
-                        warning_info.insert(def.tid.to_string(), "value.tracked_objects.get(source_id) == None".into());
+                        warning_info.insert(
+                            def.tid.to_string(),
+                            "mem object not tracked".into(),
+                        );
+
                     }
+                } else {
+                    warning_info.insert(
+                        def.tid.to_string(),
+                        "target not unique or top".into(),
+                    );
+
                 }
             } else {
-                warning_info.insert(def.tid.to_string(), "eval_address_at_def(&def.tid) == None".into());
+                warning_info.insert(
+                    def.tid.to_string(),
+                    "eval_address_at_def(&def.tid) == None".into(),
+                );
             }
         }
         value = computation
@@ -324,12 +354,12 @@ fn find_uninit_access_in_blk<'a>(
             .update_def(&value, def)
             .unwrap();
     }
-    
+
     cwe_warnings.dedup();
     (cwe_warnings, warning_info)
 }
 
-/// Checks if any parameter referes to an entirely uninitalized memory object and retruns a warning if true.
+/// Checks if any parameter referes to an entirely uninitalized memory object and returns a warning if true.
 fn is_call_with_uninit_parameter(
     arguments: &Vec<Arg>,
     call_tid: &Tid,
@@ -372,9 +402,6 @@ fn extract_results<'a>(
                     &computation.get_graph()[node].get_block().term,
                 );
 
-
-
-                
                 cwe_warnings.append(&mut warnings);
                 warning_info.extend(info);
             }

@@ -102,10 +102,11 @@
   },
   "CWE457": {
     "allocation_symbols": [
-      "malloc"
+      "malloc",
+      "xmalloc"
     ],
     "extern_symbol_whitelist": [
-      "memfrob"
+      ""
     ]
   },
   "CWE467": {

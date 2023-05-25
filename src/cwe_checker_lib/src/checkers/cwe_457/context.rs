@@ -236,7 +236,9 @@ impl<'a> crate::analysis::forward_interprocedural_fixpoint::Context<'a> for Cont
                             )
                         }
                     } else {
-                        println!("{} : value.tracked_objects.contains_key(id) == false", def.tid);
+                        let mut update = value.clone();
+                        update.add_new_object(id.clone(), data_domain.bytesize());
+                        return self.update_def(&update, def)
                     }
                 }
             } else {
