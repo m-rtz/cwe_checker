@@ -1,5 +1,5 @@
 use super::{state::State, InitializationStatus};
-use crate::abstract_domain::{AbstractDomain, DataDomain, SizedDomain, TryToBitvec, TryToInterval};
+use crate::abstract_domain::{DataDomain, SizedDomain, TryToBitvec};
 use crate::analysis::pointer_inference::{PointerInference, ValueDomain};
 use crate::analysis::{
     function_signature::FunctionSignature, graph::Graph, vsa_results::VsaResult,
@@ -47,7 +47,7 @@ impl<'a> Context<'a> {
 
     /// Models the effect of a `memset` call to the state.
     ///
-    /// Note: under approximation
+    /// Note: Under approximation:
     /// Only if the parameters target and size can be uniquely derived, the initialization effect of memset
     /// is applied. The state's offset are set to `InitializationStatus::Init` as defined by the parameters.
     /// If an new memory object is introduced, it is added to the state with the initialization effect.
@@ -57,16 +57,13 @@ impl<'a> Context<'a> {
         memset_symbol: &ExternSymbol,
         value: &State,
     ) -> Option<State> {
-        //println!("handeling memset");
         let params = self.extract_parameters(memset_symbol, call_tid);
         if let Some(target) = &params[0] {
             if let Some(size) = &params[2] {
                 if let Some((id, target_offset_interval)) = target.get_if_unique_target() {
-                    // TODO: if relative value is not unique, maybe set to MaybeInit
                     if let Ok(target_offset) = target_offset_interval.try_to_offset() {
                         if let Some(size_interval) = size.get_if_absolute_value() {
                             if let Ok(size) = size_interval.try_to_offset() {
-                                // over approx here
                                 let mut new_state = value.clone();
                                 if !new_state.tracked_objects.contains_key(id) {
                                     new_state.add_new_object(id.clone(), target.bytesize());
@@ -92,9 +89,9 @@ impl<'a> Context<'a> {
 
     /// Models the effect of a `memcpy` call to the state.
     ///
-    /// Note: under approximation
+    /// Note: Under approximation
     /// Only if all parameters can be derived uniquely derived, the effect of `memcpy` is applied.
-    /// The `InitializationStatus` of the source offsets is copied, thus target offsts might be `InitializationStatus::Uninit`
+    /// The `InitializationStatus` of the source offsets is copied, thus target offsets might be `InitializationStatus::Uninit`
     /// If an new memory object is introduced, it is added to the state completely uninitialized.
     fn handle_memcpy(
         &self,
@@ -117,14 +114,12 @@ impl<'a> Context<'a> {
                                                 target_id.clone(),
                                                 target.bytesize(),
                                             )
-                                            // TODO emit log message here
                                         }
                                         if !state.tracked_objects.contains_key(source_id) {
                                             state.add_new_object(
                                                 source_id.clone(),
                                                 source.bytesize(),
                                             )
-                                            // TODO emit log message here
                                         }
 
                                         match state.copy_range_from_other_object(
@@ -135,7 +130,7 @@ impl<'a> Context<'a> {
                                             size,
                                         ) {
                                             Ok(_) => return Some(state),
-                                            Err(_) => todo!(), // emit log message
+                                            Err(_) => todo!(),
                                         }
                                     }
                                 }
@@ -151,7 +146,8 @@ impl<'a> Context<'a> {
 
     /// Removes all memory objects that are arguments to `free` from the state.
     ///
-    /// This is not necessary for the algorithm and only an optimization.
+    /// This is not necessary for the algorithm and only an optimization, since new memory objects are added, if
+    /// the Pointer Inference keeps track of them.
     fn handle_free(
         &self,
         call_tid: &Tid,
@@ -198,15 +194,13 @@ impl<'a> crate::analysis::forward_interprocedural_fixpoint::Context<'a> for Cont
     }
 
     /// Changes the `InitalizationStatus` of an `Uninit` memory object's offset to `Init`, if a `Store` instruction
-    /// manipulates the memory object' offset.
+    /// manipulates the memory object's offset.
     fn update_def(&self, value: &Self::Value, def: &Term<Def>) -> Option<Self::Value> {
-        //println!("update_def: {} @ {}", &def.term, &def.tid);
         if let Def::Store { .. } = &def.term {
             if let Some(data_domain) = self.pir.eval_address_at_def(&def.tid) {
                 for (id, interval) in data_domain.get_relative_values().iter() {
                     if value.tracked_objects.contains_key(id) {
                         // We track this mem object
-                        //println!("we do track: {} and interval is top: {}", id, interval.is_top());
                         if let Ok(mem_offset) = interval.try_to_offset() {
                             if let Some(value_domain) = self.pir.eval_value_at_def(&def.tid) {
                                 let mut updated = value.clone();
@@ -220,31 +214,18 @@ impl<'a> crate::analysis::forward_interprocedural_fixpoint::Context<'a> for Cont
                                         },
                                     );
                                 }
-                                //println!("{}", updated.to_string());
                                 return Some(updated);
-                            } else {
-                                println!(
-                                    "{} : pir.eval_value_at_def(&def.tid) == None (update_def)",
-                                    def.tid
-                                );
                             }
-                        } else {
-                            println!(
-                                "{} : offset interval.try_to_offset() == Err (top: {})",
-                                def.tid,
-                                interval.is_top()
-                            )
                         }
                     } else {
                         let mut update = value.clone();
                         update.add_new_object(id.clone(), data_domain.bytesize());
-                        return self.update_def(&update, def)
+                        return self.update_def(&update, def);
                     }
                 }
-            } else {
-                println!("{} : eval_address_at_def(&def.tid) == None", def.tid);
             }
         }
+
         Some(value.clone())
     }
 
@@ -301,7 +282,6 @@ impl<'a> crate::analysis::forward_interprocedural_fixpoint::Context<'a> for Cont
                 .get(target),
             _ => None,
         } {
-            //println!("{:?}: {}", call.tid, extern_symbol.name);
             match extern_symbol.name.as_str() {
                 "memset" => return self.handle_memset(&call.tid, extern_symbol, value),
                 "memcpy" => return self.handle_memcpy(&call.tid, extern_symbol, value),
@@ -309,14 +289,6 @@ impl<'a> crate::analysis::forward_interprocedural_fixpoint::Context<'a> for Cont
                 _ => {}
             }
         }
-
-        //dbg!(self.function_signatures);
-        //println!("entered update call stub");
-
-        //for (name, pattern) in &self.pir.get_context().extern_fn_param_access_patterns{
-        //    println!("{}: {:#?}", name, pattern)
-        //}
-        //if let Some(a)= self.pir.eval_parameter_arg_at_call(&call.tid, self.pir.get_context().extern_fn_param_access_patterns){
 
         Some(value.clone())
     }

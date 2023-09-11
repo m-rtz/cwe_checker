@@ -14,7 +14,7 @@ pub enum InitializationStatus {
 }
 
 impl InitializationStatus {
-    /// Merge for inter block tracking
+    /// Merge for intra block tracking
     ///
     /// Any `InitializationStatus` merged with `Init` results in `Init`.
     pub fn merge_precise(&self, other: &Self) -> Self {
@@ -41,7 +41,7 @@ impl InitializationStatus {
 }
 
 impl AbstractDomain for InitializationStatus {
-    /// Merge for intra block tracking
+    /// Merge for inter block tracking
     ///
     /// Same `InitializationStatus` are kept.
     /// Introduces `MaybeInit` if `Init` and `Uninit` are merged.
@@ -108,7 +108,7 @@ impl HasTop for InitializationStatus {
 }
 
 impl MemRegion<InitializationStatus> {
-    /// Returns the `InitalizationStatus` at the given offset.
+    /// Returns the `InitializationStatus` at the given offset.
     ///
     /// If no value at the offset is present `InitalizationStatus::Uninit` is returned.
     pub fn get_init_status_at_byte_index(&self, index: i64) -> InitializationStatus {
@@ -148,6 +148,10 @@ impl MemRegion<InitializationStatus> {
         }
     }
 
+    /// Returns true if the `MemRegion` contains at least one `InitalizationStatus::MaybeInit` value
+    /// within the given offset interval.
+    ///
+    /// Positive offsets can be ignored, which in fact treats them as initialized.
     pub fn get_maybe_init_locatons_within_interval(
         &self,
         interval: &IntervalDomain,
@@ -173,11 +177,8 @@ impl MemRegion<InitializationStatus> {
                     }
                 }
             } else {
-                println!("fat interval in get_maybe_init_locatons_within_interval! returnin None");
                 return None;
             }
-        } else {
-            //println!("could not get offset interval.")
         }
         if maybe_init.is_empty() {
             return None;
@@ -195,10 +196,6 @@ impl MemRegion<InitializationStatus> {
                     self.insert_at_byte_index(InitializationStatus::Uninit.merge(status), i);
                 }
             }
-        } else {
-            //println!(
-            //    "provided interval can not be turned into offset interval... find a solution here!"
-            //)
         }
     }
 

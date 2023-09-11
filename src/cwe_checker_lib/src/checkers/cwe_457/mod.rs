@@ -1,3 +1,31 @@
+//! This module implements a check for CWE-457: Use of Uninitialized Variable.
+//!
+//! Variables might not be initialized when they are used and this might lead to unexpected behavior.
+//! This holds for allocated stack variables and variables returned by allocation function like `malloc`.
+//! The use of such uninitialized variables might have security implications.
+//!
+//! The term variables and memory offsets are used here interchangeably.
+//!
+//! See <https://cwe.mitre.org/data/definitions/457.html> for detailed descriptions.
+//!
+//! ## How the check works
+//!
+//! Using an intraprocedural, top-down dataflow analysis
+//! based on the results of the [Pointer Inference analysis](`crate::analysis::pointer_inference`).
+//! The check keeps track of memory objects and their initialization status.
+//! If an instruction is loading a memory offset, that is labeled as uninitialized the use of uninitialized variable is detected and a corresponding warning is triggered.
+//! CWE warnings that differ, but share the same root cause are not deduplicated.
+//!
+//! ## False Positives
+//!
+//! - Since the analysis is not path-sensitive, infeasible paths may lead to false positives.
+//! - Entirely uninitialized memory objects, that are passed as function parameter, trigger a warning without verifying its access.
+//!
+//!
+//! ## False Negatives
+//! - Only offset intervals that contain exact one value are considered for triggering warnings.
+//! - External functions are not supported, except `malloc` and `memset`.
+
 mod context;
 use self::{context::Context, init_status::InitializationStatus, state::State};
 use crate::{
@@ -100,7 +128,6 @@ fn init_heap_allocation<'a>(
                         .extend(node_value.unwrap_value().tracked_objects.clone());
                 }
                 computation.set_node_value(*node, Value(state));
-                println!("added {} for call @ {call}", &id.get_tid());
             }
         }
     }
@@ -177,7 +204,9 @@ fn generate_cwe_warning_for_uninit_access_(
     .symbols(vec![])
 }
 
-/// Generate a more verbose CWE warning for a detected instance of the CWE.
+/// Generate a CWE warning for a potentially detected instance of the CWE.
+///
+/// This warning contains the locations of potential initialization locations.
 fn generate_cwe_warning_for_maybe_uninit_access(
     location: &Tid,
     sub: &Sub,
@@ -215,7 +244,7 @@ fn generate_cwe_warning_for_maybe_uninit_access(
         .symbols(vec![])
 }
 
-// Generates a waring according to a call with uninitialized parameter
+// Generates a warning according to a call with uninitialized parameter
 fn generate_cwe_warning_for_uninit_parameter(
     location: &Tid,
     callee: &Sub,
@@ -314,38 +343,9 @@ fn find_uninit_access_in_blk<'a>(
                                         .insert(def.tid.to_string(), format!("offset: {}", offset));
                                 }
                             }
-                        } if let Ok((s, e)) = offset_interval.try_to_offset_interval() {
-                            if s != e {
-                                warning_info.insert(
-                                    def.tid.to_string(),
-                                    format!("interval not precise: [{}:{}]", s, e).into(),
-                                );
-
-                            }
-                            
-                        } else {
-                            warning_info
-                                .insert(def.tid.to_string(), format!("interval error",).into());
                         }
-                    } else {
-                        warning_info.insert(
-                            def.tid.to_string(),
-                            "mem object not tracked".into(),
-                        );
-
                     }
-                } else {
-                    warning_info.insert(
-                        def.tid.to_string(),
-                        "target not unique or top".into(),
-                    );
-
                 }
-            } else {
-                warning_info.insert(
-                    def.tid.to_string(),
-                    "eval_address_at_def(&def.tid) == None".into(),
-                );
             }
         }
         value = computation
@@ -359,7 +359,7 @@ fn find_uninit_access_in_blk<'a>(
     (cwe_warnings, warning_info)
 }
 
-/// Checks if any parameter referes to an entirely uninitalized memory object and returns a warning if true.
+/// Checks if any parameter refers to an entirely uninitialized memory object and returns a warning if true.
 fn is_call_with_uninit_parameter(
     arguments: &Vec<Arg>,
     call_tid: &Tid,
@@ -392,9 +392,7 @@ fn extract_results<'a>(
     let pir = computation.get_context().get_context().pir;
     for node in graph.node_indices() {
         if let Node::BlkStart(_, _) = graph[node] {
-            // BlkEnd wirklich nötig hier?
             if let Some(node_value) = computation.get_node_value(node) {
-                //println!("\n{}", graph[node]);
                 let (mut warnings, info) = find_uninit_access_in_blk(
                     &computation,
                     node_value.unwrap_value(),
@@ -407,7 +405,6 @@ fn extract_results<'a>(
             }
         }
     }
-    println!("{}", serde_json::to_string_pretty(&warning_info).unwrap());
 
     for edge in graph.edge_indices() {
         // Iterating external calls, that are not white listed
@@ -440,7 +437,6 @@ fn extract_results<'a>(
                 let func_sig = computation.get_context().get_context().function_signatures;
                 if let Some(signature) = func_sig.get(target) {
                     let arguments = &signature.parameters.keys().cloned().collect();
-                    //dbg!(&arguments);
                     let node_index = graph.edge_endpoints(edge).unwrap().0;
                     if let Some(pir_state) = computation.get_node_value(node_index) {
                         let state = pir_state.unwrap_value();
@@ -473,40 +469,19 @@ pub fn check_cwe(
     let allocation_target_nodes =
         get_allocation_return_sites(config.allocation_symbols, pir.get_graph(), analysis_results);
 
-    //print_graph(pir.get_graph());
-
     let computation = create_computation(context, None);
     let computation = init_stack_allocation(computation, pointer_size, pir);
     let mut computation =
         init_heap_allocation(computation, &allocation_target_nodes, pointer_size, pir);
-    println!(
-       "\n#################################\n START COMPUTING FIXPOINT\n#################################"
-    );
+
     computation.compute_with_max_steps(100);
-    println!(
-       "\n#################################\n END COMPUTING FIXPOINT\n#################################"
-    );
 
     if !computation.has_stabilized() {
-        panic!("Fixpoint for CWE 908 did not stabilize.");
+        panic!("Fixpoint for CWE 457 did not stabilize.");
     }
 
     let mut cwe_warnings = extract_results(computation, config.extern_symbol_whitelist);
-    //println!("\n###########\nFinal Results\n#########");
-    cwe_warnings.dedup();
     cwe_warnings.dedup();
 
     (vec![], cwe_warnings)
-}
-
-fn print_graph(graph: &Graph) {
-    for node in graph.node_indices() {
-        if let Node::BlkStart(blk, _sub) = graph[node] {
-            println!("blk: {} @ {}", blk.tid, blk.tid.address);
-            for def in &blk.term.defs {
-                println!("\t{}: {}", def.tid, def.term)
-            }
-            println!()
-        }
-    }
 }
